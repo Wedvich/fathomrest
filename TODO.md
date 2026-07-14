@@ -6,47 +6,34 @@ pick up next".
 
 ## Done last session
 
-Workspace scaffolded: Bun workspaces, `@fathomrest/core` (pure TS, boundary enforced
-by oxlint) + `@fathomrest/app` (React + PixiJS + Vite). TS 7, Vitest, oxlint/oxfmt.
-All of `bun run typecheck | test | lint | build` green. Core is a placeholder export —
-no sim yet.
+Sim core spine built in `packages/core` per ADR-0001 (branch `sim-core-spine`):
+branded ids, `SimState` document (EC `Map` tables + PRNG + event queue + clocks),
+sfc32 PRNG, clock helpers, per-table accessor boundary, binary min-heap event queue
+with seq-based lazy staleness, `advance(t)`/pure queries, and the shared
+`Map ↔ [id, component][]` serializer. Toy extractor → warehouse chain exercises the
+piecewise regimes (tracking / pinned-full / pinned-empty) and event rescheduling.
+Determinism test passes bit-identically (one 3-day advance ≡ 10 000 or 3 333 small
+advances, with mid-run commands). `typecheck | test | lint | build` all green.
 
-## Next session — sim core spine
+## Next session — first real mechanics slice
 
-Build the engine skeleton in `packages/core` (per
-[ADR-0001](docs/adr-0001-game-loop-and-state-model.md)). No gameplay mechanics yet;
-the toy chain below exists only to exercise the plumbing. Suggested order — each step
-builds on the last:
+Per DESIGN.md (don't start a mechanic before it passes the ADR-0001 §2 litmus test):
 
-1. **Ids & state document** — branded `Id` type; the `SimState` shape: EC component
-   tables (`Map<Id, Component>`), PRNG state, `epoch` (sim seconds) + `wallTime`
-   anchor. This type _is_ the serialization shape — design it once here.
-2. **Seeded PRNG** — one deterministic generator, state lives in `SimState`.
-   `Math.random` banned in core (oxlint rule to enforce later). Unit-test reproducibility.
-3. **Clock helpers** — pure functions: `offlineElapsed = max(0, now − wallTime)`;
-   never advance backwards. No timers in core (the app owns rAF/visibility).
-4. **Table access boundary** — per-table accessor modules (`get`/`set`/`forEach`/`ids`),
-   one factory per component for shape stability (all fields set, sentinels not absent).
-   No raw `Map` ops at call sites; iteration order owned by the module.
-5. **Event queue** — binary min-heap over a preallocated array, `(time, kindPriority,
-entityId)` tiebreak; lazy deletion (mark stale, skip on pop) for reschedules.
-6. **`advance(t)` / `query(t)`** — `advance` pops & applies due events then reschedules
-   affected ones; `query` is a pure read evaluating `f(t)` from the last event's anchor
-   (absolute closed form, never incremental accumulation).
-7. **Serializer** — `Map` ↔ `[id, component][]` codec, one function shared by
-   export/import (and future cloud sync); round-trip test.
+1. **Deposits** with depletion-to-floor curves feeding extractors; full warehouse
+   pauses depletion (extend the pinned-full regime to throttle deposit draw).
+   Watch the float-determinism caveat if the curve needs transcendentals
+   (docs/browser-performance.md) — prefer arithmetic-closed forms.
+2. **Transport routes** as instant rate-capped flows between warehouses. This makes
+   inflow/outflow a small dependency graph — generalize `deriveWarehouseRegime`'s
+   rederive-on-change into rate re-derivation across connected entities.
+3. **App wiring**: rAF loop → `advance(t)`/`query(t)` → a placeholder Pixi readout
+   once the core surface feels stable. Replace the static demo in `App.tsx`.
 
-Prove it (test-first — write the determinism test before any mechanic):
+Engine follow-ups deferred from the spine (do when they start to matter):
 
-- **Determinism**: `advance(3 days)` ≡ the same span done as thousands of small
-  advances — bit-identical state. This is the load-bearing invariant (ADR §5, §8).
-- **Toy chain**: one extractor → warehouse fill event → saturation regime (warehouse
-  pinned at cap, producer throttled to consumer pull rate). Validates the piecewise
-  regime model and event rescheduling, not just the plumbing.
-
-## After the spine (don't start until the above is green)
-
-First real mechanics slice: deposits with depletion-to-floor curves, transport routes
-as instant rate-capped flows. Each must pass the ADR §2 litmus test before coding.
-Wire the app's rAF loop → `advance`/`query` → a placeholder Pixi readout once the
-core exposes a stable surface.
+- oxlint rule banning `Math.random` in core (ADR-0001 §5 says enforce by lint).
+- Event dispatch currently assumes all events target warehouses
+  (`isStaleEvent`/`handleEvent` in `sim.ts`) — generalize when a second
+  event-bearing table appears.
+- Commands re-derive only the directly-touched warehouse; routes (step 2) will need
+  downstream invalidation.
