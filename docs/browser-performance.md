@@ -20,7 +20,7 @@ layer**, ~60×/s. All allocation and monomorphism discipline concentrates there.
   (iterator protocol allocates per step; V8 often escape-analyzes it away, JSC less
   reliably — indexed loops are the neutral-worst-case choice).
 - Number formatting for display is not free: cache formatted strings per counter and
-  reformat only when the *displayed* (rounded) value changes, not every frame.
+  reformat only when the _displayed_ (rounded) value changes, not every frame.
 
 **Health check**: Chrome DevTools → Performance with Memory enabled. With the game
 idle (no events firing), the minor-GC sawtooth should be near-flat. Churn while
@@ -59,7 +59,7 @@ exposing typed accessors:
   deletion through one function — no ad-hoc `map.set`/`map.delete` at call sites.
 
 Rationale: this costs almost nothing now and localizes a future storage-layout change
-(e.g. giving *one* oversized numeric table an SoA arena) to a single module instead of
+(e.g. giving _one_ oversized numeric table an SoA arena) to a single module instead of
 a codebase-wide refactor. It is insurance, not a plan: do not build index arenas,
 generational ids, or swap-remove until a profiler shows table access as a cost — at
 current design scale (hundreds of entities, no per-tick systems) it will not.
@@ -115,7 +115,7 @@ assume a large slice of idle-game sessions live there.
 
 - `useSyncExternalStore`'s `getSnapshot` must return the **same reference** until the
   version counter bumps — cache the snapshot against the version, or React loops.
-- The coarse amount re-sampling happens *inside* components (local interval → local
+- The coarse amount re-sampling happens _inside_ components (local interval → local
   state), never by bumping the store version — the version counter means "structure
   changed" and nothing else.
 - Keep Pixi objects out of React state and vice versa. Pixi holds long-lived display
@@ -154,7 +154,7 @@ assume a large slice of idle-game sessions live there.
 - No typed-array/SoA rewrite of the EC tables at current entity scale. The table
   access boundary above is the only concession; if one table ever grows huge and
   purely numeric (e.g. mass-generated trickle-islands in far expedition rings), give
-  *that table* an SoA layout inside its module — never convert the architecture.
+  _that table_ an SoA layout inside its module — never convert the architecture.
 - No manual memoization webs in React panels before measuring; version-gated
   re-render already bounds them.
 

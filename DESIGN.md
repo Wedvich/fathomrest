@@ -23,7 +23,7 @@ extract, refine, research, and sail out to discover new islands.
 
 1. **Building** — Anno-style placement of extractors and support buildings into
    **fixed slots on illustrated island maps**. Deposits sit at specific sites;
-   adjacency perks reward smart siting. Build *order* and *site choice* are the decisions
+   adjacency perks reward smart siting. Build _order_ and _site choice_ are the decisions
    (buildings cost resources; slots are scarce).
 2. **Expeditions** — outfit a voyage (crew, supplies, gear crafted from resources),
    pick a heading guided by rumors, resolve over minutes with 2–4 live decision points
