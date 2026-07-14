@@ -10,7 +10,7 @@
     "format": "oxfmt .",
     "lint": "oxlint",
     "test": "vitest run",
-    "typecheck": "bun run --filter '*' typecheck"
+    "typecheck": "tsc && bun run --filter '*' typecheck"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

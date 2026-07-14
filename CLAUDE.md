@@ -45,14 +45,18 @@ orchestration). TypeScript 7, ESM throughout.
 
 Tooling: **oxlint** (lint) + **oxfmt** (format) — no ESLint/Prettier. **Vitest**
 for tests (`*.test.ts` colocated with source). TS 7's `tsc` is typecheck-only
-(`--noEmit`); Vite/esbuild does the actual transpile.
+(`noEmit` in `tsconfig.base.json`); Vite/esbuild does the actual transpile.
+The app typechecks as two programs (`tsconfig.app.json` = browser `src/`,
+`tsconfig.tools.json` = `vite.config.ts`) via solution `tsconfig.json` +
+`tsc -b`; the root `tsconfig.json` covers `vitest.config.ts`. Keep tooling
+configs out of the browser programs — their types leak non-browser globals.
 
 Commands (from repo root):
 
 - `bun install` — install all workspace deps.
 - `bun run dev` — Vite dev server (run in `packages/app`, or `bun run --filter '@fathomrest/app' dev`).
 - `bun run build` — production build of the app.
-- `bun run typecheck` — `tsc --noEmit` across both packages.
+- `bun run typecheck` — root config files + both packages.
 - `bun run test` — Vitest across the workspace.
 - `bun run lint` / `bun run format` — oxlint / oxfmt over the repo.
 
