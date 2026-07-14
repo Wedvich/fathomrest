@@ -7,7 +7,7 @@
 DESIGN.md committed to "fixed UPS + event-jump catch-up": a fixed-timestep accumulator
 online, analytic event-jumping offline, sharing one math core. Grilling that decision
 exposed a latent contradiction: per-tick numeric integration (`amount += rate × dt`) and
-closed-form offline solving are *two* implementations of the same economy — exactly the
+closed-form offline solving are _two_ implementations of the same economy — exactly the
 math fork DESIGN.md forbids. One had to be the source of truth.
 
 A second question rode along: whether a classic ECS (as in the prior
@@ -15,7 +15,7 @@ A second question rode along: whether a classic ECS (as in the prior
 accumulator, once/fixed/render system phases, interpolation alpha) fits this game.
 
 Reference: [Fix Your Timestep](https://gafferongames.com/post/fix_your_timestep/) — its
-fixed-dt-plus-interpolation pattern exists to tame *numeric integration* (dt-sensitivity
+fixed-dt-plus-interpolation pattern exists to tame _numeric integration_ (dt-sensitivity
 → fixed dt → discrete state → stutter → interpolation). Remove numeric integration and
 the whole chain dissolves.
 
@@ -50,7 +50,7 @@ did this: instant flows, rate caps, shallow chains, no simulated ships):
 
 1. Between events, every quantity has a closed-form `f(t)`.
 2. Threshold crossings ("when does it fill/deplete/complete?") are solvable —
-   analytically, or by numeric root-find *at scheduling time* as a last resort.
+   analytically, or by numeric root-find _at scheduling time_ as a last resort.
 3. Event count scales with **structural state changes** (jams, completions, commands),
    never with throughput (items produced). Otherwise a long absence is millions of
    events and the tick loop has been rebuilt with extra steps.
@@ -78,7 +78,11 @@ nothing to run in — but (a) stands on its own:
   save document is just the tables serialized — persistence falls out for free.
 - **Logic** = pure functions, not tick systems: rate derivation (recompute piecewise
   rates when structure changes), event handlers (`onEvent(state, ev) → patch + new
-  events`), event schedulers (`nextEvents(state)`).
+events`), event schedulers (`nextEvents(state)`).
+- **Access boundary**: core code reads/writes tables only through per-table accessor
+  modules (get/set/forEach), never raw `Map` operations. Iteration order is owned by
+  the table module (deterministic). This localizes any future storage-layout change
+  to one module; see docs/browser-performance.md for rationale and limits.
 
 The empire loop's phase machinery (once/fixed/render system arrays) does not carry
 over. Its presentation-side ideas (sprite sync, animation) may reappear inside the Pixi

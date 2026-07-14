@@ -11,9 +11,9 @@ Scaffold the workspace and build the sim core's spine (per
 
 - Workspace: Vite, strict TS (ESM), Vitest. Decide layout — single package vs
   workspaces; sim core must be importable with zero React/Pixi deps either way.
-- Core spine: event queue with deterministic same-time tiebreak, `advance(t)` /
-  `query(t)`, wall-clock anchor + `performance.now` delta clock, seeded PRNG in
-  the state document.
+- Core spine: component tables behind per-table accessor modules, event queue with deterministic same-time
+  tiebreak, `advance(t)` / `query(t)`, wall-clock anchor + `performance.now` delta clock,
+  seeded PRNG in the state document.
 - First test written before mechanics: determinism — `advance(3 days)` ≡ the same
   span as thousands of small advances.
 - Toy chain to exercise it all: one extractor → warehouse fill event → saturation

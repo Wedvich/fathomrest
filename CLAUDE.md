@@ -11,6 +11,10 @@ paced by a research tree. TypeScript, React + PixiJS, headless simulation core.
 - [docs/adr-0001-game-loop-and-state-model.md](docs/adr-0001-game-loop-and-state-model.md) —
   event-driven analytic sim core (no fixed timestep), EC data model, clock/RNG/
   persistence rules, and the litmus test every new mechanic must pass.
+- [docs/browser-performance.md](docs/browser-performance.md) — browser/engine
+  guidance: hot-path allocation rules, shape stability, table access boundary,
+  Safari lifecycle, float-determinism caveats. Read before writing core or
+  render-loop code.
 - Future decision docs (ADRs, balancing notes) live in `docs/` — add them to this
   list as they appear.
 
