@@ -31,6 +31,13 @@ paced by a research tree. TypeScript, React + PixiJS, headless simulation core.
 - Simulation logic must stay in the headless core package — pure TS, no React/Pixi
   imports, fully unit-testable. Online ticking and offline catch-up share one math
   core; never fork the math.
+- **Testing: prefer few integration tests over many unit tests.** The default test is
+  a scenario that drives real subsystems together through the public sim API (build a
+  chain, `advance()`, assert observable behavior — see `sim.test.ts`,
+  `serialize.test.ts`). Reserve unit tests for self-contained primitives with
+  intricate internal logic (event-heap ordering, PRNG). Don't add per-function unit
+  tests for logic already exercised by a scenario, and never mock anything inside
+  the core package.
 
 ## Workspace
 
