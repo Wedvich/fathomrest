@@ -139,6 +139,13 @@ identical state. The only irreplaceable data is player input. Therefore:
 - Save on `visibilitychange → hidden` and `pagehide`.
 - No periodic autosave timer: it would persist nothing re-advance can't reproduce, and
   can mask determinism bugs.
+- **`SAVE_VERSION` is unversioned pre-release.** No save is persisted to IndexedDB yet
+  (see TODO.md), so no real save can go stale. `SAVE_VERSION` is not bumped for every
+  incompatible `SaveDocument` schema change during this phase — that discipline starts
+  only once persistence actually ships. Whoever wires up persistence must, at that
+  point, reset/bump `SAVE_VERSION` deliberately and adopt the rule that any
+  incompatible `SaveDocument` change bumps it thereafter; until then, treat
+  version-gate failures on hand-crafted old documents as expected, not as bugs.
 
 ## Implementation notes
 

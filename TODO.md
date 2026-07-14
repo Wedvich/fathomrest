@@ -6,8 +6,14 @@ pick up next".
 
 ## Done last session
 
-First real mechanic on branch `deposits` (not yet merged; rebase + `merge --ff-only`
-when ready): **deposits with stepped depletion-to-floor tiers**.
+Deferred finding 4 from the deposits review (`SAVE_VERSION` handling): decided
+**Option B** — saves stay explicitly unversioned pre-release (no save is persisted
+yet). Documented in ADR-0001 §8 that `SAVE_VERSION` bump discipline starts only once
+persistence ships; no code change needed. Version-gate test already existed in
+`serialize.test.ts`.
+
+Prior session: first real mechanic on branch `deposits` (not yet merged; rebase +
+`merge --ff-only` when ready): **deposits with stepped depletion-to-floor tiers**.
 
 - `Deposit` component: ordered richness tiers (`{amount, multiplier}`), then a
   perpetual floor multiplier. Extractors gained a required `depositId`; warehouse
