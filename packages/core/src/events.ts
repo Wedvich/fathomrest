@@ -1,10 +1,12 @@
 import type { Id } from "./ids.ts";
 
 // Same-timestamp events resolve by (time, kind priority, entity id) so online and
-// offline replays pop in the same order (ADR-0001 implementation notes).
+// offline replays pop in the same order (ADR-0001 implementation notes). Deposit tier
+// crossings change rates, so they resolve before same-instant level crossings.
 export const EVENT_KIND_PRIORITY = {
-  "warehouse-full": 0,
-  "warehouse-empty": 1,
+  "deposit-tier-depleted": 0,
+  "warehouse-full": 1,
+  "warehouse-empty": 2,
 } as const;
 
 export type EventKind = keyof typeof EVENT_KIND_PRIORITY;

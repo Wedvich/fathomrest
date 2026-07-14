@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import { getWarehouse } from "./components/warehouse.ts";
 import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
+  addDeposit,
   addExtractor,
   addWarehouse,
   advance,
+  depositMultiplier,
+  depositRemainingAt,
   extractorEffectiveRate,
   setWarehousePullRate,
   warehouseAmountAt,
@@ -20,7 +23,9 @@ function toyChain(): {
 } {
   const state = createSimState(42, 0);
   const warehouseId = addWarehouse(state, 0, 100);
-  const extractorId = addExtractor(state, 0, 2, warehouseId);
+  // Pure-floor deposit at multiplier 1: a plain perpetual producer.
+  const depositId = addDeposit(state, 0, [], 1);
+  const extractorId = addExtractor(state, 0, 2, depositId, warehouseId);
   setWarehousePullRate(state, 0, warehouseId, 0.5);
   return { state, warehouseId, extractorId };
 }
@@ -80,16 +85,102 @@ describe("toy chain", () => {
   });
 });
 
+describe("deposits", () => {
+  it("steps extraction down through richness tiers to the floor trickle", () => {
+    const state = createSimState(42, 0);
+    const warehouseId = addWarehouse(state, 0, 10_000);
+    const depositId = addDeposit(
+      state,
+      0,
+      [
+        { amount: 100, multiplier: 2 },
+        { amount: 100, multiplier: 1 },
+      ],
+      0.25,
+    );
+    const extractorId = addExtractor(state, 0, 2, depositId, warehouseId);
+
+    // Tier 1: draw 2 * 2 = 4/s; 100 units last until t=25.
+    expect(extractorEffectiveRate(state, extractorId)).toBe(4);
+    expect(depositRemainingAt(state, depositId, 0)).toBe(200);
+    expect(depositRemainingAt(state, depositId, 10)).toBe(160);
+
+    advance(state, 25);
+    // Tier 2: draw 2/s; 100 more units last until t=75.
+    expect(depositMultiplier(state, depositId)).toBe(1);
+    expect(extractorEffectiveRate(state, extractorId)).toBe(2);
+    expect(warehouseAmountAt(state, warehouseId, 25)).toBe(100);
+
+    advance(state, 75);
+    // Floor: perpetual trickle at 2 * 0.25 = 0.5/s, nothing left to deplete.
+    expect(depositMultiplier(state, depositId)).toBe(0.25);
+    expect(depositRemainingAt(state, depositId, 75)).toBe(0);
+    expect(warehouseAmountAt(state, warehouseId, 75)).toBe(200);
+
+    advance(state, 100);
+    expect(warehouseAmountAt(state, warehouseId, 100)).toBe(212.5);
+    // Only the (distant) warehouse fill is still live; stale reschedules linger in the
+    // heap until popped, so count through the serializer's canonical filter.
+    expect(serializeState(state).events.map((event) => event.kind)).toEqual(["warehouse-full"]);
+  });
+
+  it("pauses depletion while the warehouse is pinned full and resumes on pull", () => {
+    const state = createSimState(42, 0);
+    const warehouseId = addWarehouse(state, 0, 50);
+    const depositId = addDeposit(state, 0, [{ amount: 100, multiplier: 1 }], 0);
+    const extractorId = addExtractor(state, 0, 2, depositId, warehouseId);
+
+    // Fills at t=25 with 50 deposit units left; pull is 0, so depletion pauses.
+    advance(state, 500);
+    expect(getWarehouse(state, warehouseId).regime).toBe("pinned-full");
+    expect(extractorEffectiveRate(state, extractorId)).toBe(0);
+    expect(depositRemainingAt(state, depositId, 500)).toBe(50);
+    expect(state.events.size).toBe(0); // paused world schedules nothing
+
+    // Consumer pull resumes the throttled draw at 0.5/s: floor at t=600.
+    setWarehousePullRate(state, 500, warehouseId, 0.5);
+    advance(state, 600);
+    expect(depositMultiplier(state, depositId)).toBe(0);
+    expect(depositRemainingAt(state, depositId, 600)).toBe(0);
+
+    // Floor multiplier 0: inflow dies, the warehouse drains 50 units by t=700.
+    expect(warehouseAmountAt(state, warehouseId, 650)).toBe(25);
+    advance(state, 700);
+    expect(getWarehouse(state, warehouseId).regime).toBe("pinned-empty");
+    expect(warehouseOutflowRate(state, warehouseId)).toBe(0);
+  });
+
+  it("rejects malformed tier tables at the command boundary", () => {
+    const state = createSimState(42, 0);
+    expect(() => addDeposit(state, 0, [{ amount: 0, multiplier: 1 }], 1)).toThrow(/amount/);
+    expect(() => addDeposit(state, 0, [{ amount: Number.NaN, multiplier: 1 }], 1)).toThrow(
+      /amount/,
+    );
+    expect(() => addDeposit(state, 0, [{ amount: 10, multiplier: -1 }], 1)).toThrow(/multiplier/);
+    expect(() => addDeposit(state, 0, [], Number.POSITIVE_INFINITY)).toThrow(/floor/);
+  });
+});
+
 describe("determinism", () => {
   const TOTAL_SPAN = 3 * 86_400;
 
   // Same 3-day span, same mid-run commands at exact times — only the advance()
   // granularity differs. Bit-identical final state is the load-bearing invariant
-  // (ADR-0001 §5, §8, consequences).
+  // (ADR-0001 §5, §8, consequences). The deposit tiers interleave crossings with the
+  // command-driven regime flips.
   function runScenario(stepCount: number): SaveDocument {
     const state = createSimState(7, 0);
     const warehouseId = addWarehouse(state, 0, 500);
-    addExtractor(state, 0, 3, warehouseId);
+    const depositId = addDeposit(
+      state,
+      0,
+      [
+        { amount: 60_000, multiplier: 1.5 },
+        { amount: 90_000, multiplier: 0.75 },
+      ],
+      0.25,
+    );
+    addExtractor(state, 0, 3, depositId, warehouseId);
     setWarehousePullRate(state, 0, warehouseId, 1);
     const commands: readonly (readonly [number, number])[] = [
       [40_000, 5], // drain toward empty

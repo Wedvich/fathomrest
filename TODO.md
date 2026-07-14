@@ -6,47 +6,51 @@ pick up next".
 
 ## Done last session
 
-Adversarial review of the sim-core spine (branch `sim-core-spine`), then applied all
-six surviving findings:
+First real mechanic on branch `deposits` (not yet merged; rebase + `merge --ff-only`
+when ready): **deposits with stepped depletion-to-floor tiers**.
 
-- `advance(t)` rejects non-finite `t` (NaN used to drain the whole event queue).
-- `deserializeState` fully validates the untrusted save document (finite fields,
-  table shapes, event kinds, referential integrity of entity ids).
-- Package index trimmed to the command/query/serialize surface + read accessors;
-  mutating internals (table setters, event queue ops, PRNG steppers) are
-  package-private so the command layer can't be bypassed.
-- Warehouse caches `inflow` at derive time; rate queries are allocation-free O(1)
-  again (no table scan in the query path).
-- Commands now take the command time `t` and `advance(t)` internally — "commands
-  land at the current time" is a mechanism, not a caller convention. ADR-0001
-  Commands bullet updated to match.
-- `serializeState` copies events, so a save document never aliases live state.
+- `Deposit` component: ordered richness tiers (`{amount, multiplier}`), then a
+  perpetual floor multiplier. Extractors gained a required `depositId`; warehouse
+  inflow is now `Σ rate × tierMultiplier`. Empty tier list = pure-floor deposit
+  (plain perpetual producer — what the toy chain and app demo use).
+- Depletion rate = sum of _actual_ (throttle-adjusted) extractor draws, so a
+  pinned-full warehouse with zero pull pauses depletion, and partial pull depletes
+  proportionally. DESIGN.md updated to record the stepped-tier form.
+- Rescheduling reworked from per-warehouse rederive to a global `deriveAll(state)`
+  after every event/command: phase 1 warehouses (regimes from tier multipliers),
+  phase 2 deposits (depletion from phase-1 throttles) — dependency order, one pass,
+  no fixed-point iteration. `advance()` now moves `epoch` to each event's time before
+  handling so re-anchoring never evaluates backwards.
+- Event dispatch generalized for a second event-bearing table: new kind
+  `deposit-tier-depleted` (priority 0 — rate changes resolve before same-instant
+  level crossings), per-kind `isStaleEvent`, per-kind save-document entityId checks.
+- Serializer: deposits table with deep-copied tier arrays (no aliasing), tierIndex
+  integer/range validation, extractor→deposit referential integrity.
+- oxlint `no-restricted-properties` now bans `Math.random` in core (ADR-0001 §5
+  follow-up done).
+- Determinism scenario extended with a tiered deposit; new integration scenarios for
+  tier stepping and pause/resume. `typecheck | test | lint` all green.
 
-`typecheck | test | lint` all green. Branch not yet merged to `main` (rebase +
-`merge --ff-only` when ready).
+## Next session
 
-## Next session — first real mechanics slice
+Per DESIGN.md / TODO step order (litmus-test each mechanic against ADR-0001 §2 first):
 
-Per DESIGN.md (don't start a mechanic before it passes the ADR-0001 §2 litmus test):
-
-1. **Deposits** with depletion-to-floor curves feeding extractors; full warehouse
-   pauses depletion (extend the pinned-full regime to throttle deposit draw).
-   Watch the float-determinism caveat if the curve needs transcendentals
-   (docs/browser-performance.md) — prefer arithmetic-closed forms.
-2. **Transport routes** as instant rate-capped flows between warehouses. This makes
-   inflow/outflow a small dependency graph — generalize `deriveWarehouseRegime`'s
-   rederive-on-change into rate re-derivation across connected entities. The cached
-   `warehouse.inflow` becomes derived graph state here.
-3. **App wiring**: rAF loop → `advance(t)`/`query(t)` → a placeholder Pixi readout
+1. **Transport routes** as instant rate-capped flows between warehouses ("B pulls
+   from A, max X/min"). This turns inflow/outflow into a small dependency graph:
+   `deriveAll`'s two-phase pass must become a propagation across connected
+   warehouses (a route's actual flow depends on the source's regime, which depends
+   on its own inflow…). Watch for the pinned-empty source case — same regime
+   treatment as pinned-full. `warehouse.pullRate` likely splits into player-set
+   sink pull vs derived route pull.
+2. **App wiring**: rAF loop → `advance(t)`/`query(t)` → a placeholder Pixi readout
    once the core surface feels stable. Replace the static demo in `App.tsx`.
    Remember the app re-stamps `state.wallTime` at save time (state.ts contract).
 
-Engine follow-ups deferred from the spine (do when they start to matter):
+Engine follow-ups (do when they start to matter):
 
-- oxlint rule banning `Math.random` in core (ADR-0001 §5 says enforce by lint).
-- Event dispatch currently assumes all events target warehouses
-  (`isStaleEvent`/`handleEvent` in `sim.ts`) — generalize when a second
-  event-bearing table appears; the save-document validator's entityId check
-  generalizes with it.
-- Commands re-derive only the directly-touched warehouse; routes (step 2) will need
-  downstream invalidation.
+- `deriveAll` is global O(entities) per event/command and re-anchors everything —
+  fine at design scale; routes work (above) is the natural point to introduce
+  targeted downstream invalidation if it ever shows up in a profile.
+- Stale events linger in the heap until their time passes (lazy deletion); the
+  serializer filters them. If heap size ever matters during very long offline spans,
+  consider periodic compaction — not before.

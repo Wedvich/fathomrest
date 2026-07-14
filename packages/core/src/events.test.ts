@@ -44,11 +44,13 @@ describe("event queue", () => {
     pushEvent(queue, event({ time: 1, kind: "warehouse-empty", entityId: idFromNumber(1) }));
     pushEvent(queue, event({ time: 1, kind: "warehouse-full", entityId: idFromNumber(2) }));
     pushEvent(queue, event({ time: 1, kind: "warehouse-full", entityId: idFromNumber(1) }));
+    pushEvent(queue, event({ time: 1, kind: "deposit-tier-depleted", entityId: idFromNumber(3) }));
     const popped: [string, number][] = [];
     for (let next = popEvent(queue); next !== null; next = popEvent(queue)) {
       popped.push([next.kind, next.entityId]);
     }
     expect(popped).toEqual([
+      ["deposit-tier-depleted", 3],
       ["warehouse-full", 1],
       ["warehouse-full", 2],
       ["warehouse-empty", 1],

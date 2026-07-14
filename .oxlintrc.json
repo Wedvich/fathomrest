@@ -10,6 +10,14 @@
           {
             "patterns": ["react", "react/*", "react-dom", "react-dom/*", "pixi.js", "pixi.js/*"]
           }
+        ],
+        "no-restricted-properties": [
+          "error",
+          {
+            "object": "Math",
+            "property": "random",
+            "message": "Core randomness must come from the seeded PRNG (ADR-0001 §5)."
+          }
         ]
       }
     }

@@ -12,6 +12,13 @@ export { offlineElapsedSeconds } from "./clock.ts";
 export type { EventKind, EventQueue, SimEvent } from "./events.ts";
 export { createSimState, type SimState } from "./state.ts";
 export {
+  depositIds,
+  forEachDeposit,
+  getDeposit,
+  type Deposit,
+  type DepositTier,
+} from "./components/deposit.ts";
+export {
   extractorIds,
   forEachExtractor,
   getExtractor,
@@ -25,9 +32,12 @@ export {
   type WarehouseRegime,
 } from "./components/warehouse.ts";
 export {
+  addDeposit,
   addExtractor,
   addWarehouse,
   advance,
+  depositMultiplier,
+  depositRemainingAt,
   extractorEffectiveRate,
   setWarehousePullRate,
   warehouseAmountAt,

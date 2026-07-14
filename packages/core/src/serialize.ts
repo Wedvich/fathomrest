@@ -1,3 +1,4 @@
+import type { Deposit, DepositTier } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import { WAREHOUSE_REGIMES, type Warehouse } from "./components/warehouse.ts";
 import {
@@ -29,25 +30,41 @@ export interface SaveDocument {
   events: SimEvent[];
   extractors: TableEntries<Extractor>;
   warehouses: TableEntries<Warehouse>;
+  deposits: TableEntries<Deposit>;
 }
 
 // Tables and events are copied in both directions so a save document never aliases
-// live state.
+// live state. Components with nested data (deposit tiers) pass a deep copier.
 
-export function tableToEntries<T extends object>(table: ReadonlyMap<Id, T>): TableEntries<T> {
+function shallowCopy<T extends object>(component: T): T {
+  return { ...component };
+}
+
+function copyDeposit(deposit: Deposit): Deposit {
+  return {
+    ...deposit,
+    tiers: deposit.tiers.map((tier): DepositTier => ({ ...tier })),
+  };
+}
+
+export function tableToEntries<T extends object>(
+  table: ReadonlyMap<Id, T>,
+  copy: (component: T) => T = shallowCopy,
+): TableEntries<T> {
   const entries: TableEntries<T> = [];
   for (const [id, component] of table) {
-    entries.push([id, { ...component }]);
+    entries.push([id, copy(component)]);
   }
   return entries;
 }
 
 export function entriesToTable<T extends object>(
   entries: readonly (readonly [Id, T])[],
+  copy: (component: T) => T = shallowCopy,
 ): Map<Id, T> {
   const table = new Map<Id, T>();
   for (const [id, component] of entries) {
-    table.set(id, { ...component });
+    table.set(id, copy(component));
   }
   return table;
 }
@@ -66,6 +83,7 @@ export function serializeState(state: SimState): SaveDocument {
       .map((event) => ({ ...event })),
     extractors: tableToEntries(state.extractors),
     warehouses: tableToEntries(state.warehouses),
+    deposits: tableToEntries(state.deposits, copyDeposit),
   };
 }
 
@@ -133,8 +151,39 @@ function validateDocument(doc: SaveDocument): void {
       throw invalid(`${at}.regime must be one of ${WAREHOUSE_REGIMES.join(", ")}`);
     }
   });
+  const depositIds = checkTable(doc.deposits, "deposits", (deposit, at) => {
+    if (!Array.isArray(deposit.tiers)) {
+      throw invalid(`${at}.tiers must be an array`);
+    }
+    for (const [index, tier] of deposit.tiers.entries()) {
+      if (tier === null || typeof tier !== "object") {
+        throw invalid(`${at}.tiers[${index}] must be an object`);
+      }
+      checkFinite(tier.amount, `${at}.tiers[${index}].amount`);
+      checkFinite(tier.multiplier, `${at}.tiers[${index}].multiplier`);
+    }
+    checkFinite(deposit.tierIndex, `${at}.tierIndex`);
+    // A non-integer or out-of-range index would evaluate the floor regime against a
+    // tier that half-exists; the sim indexes tiers[tierIndex] directly.
+    if (
+      !Number.isInteger(deposit.tierIndex) ||
+      deposit.tierIndex < 0 ||
+      deposit.tierIndex > deposit.tiers.length
+    ) {
+      throw invalid(`${at}.tierIndex must be an integer in [0, tiers.length]`);
+    }
+    checkFinite(deposit.floorMultiplier, `${at}.floorMultiplier`);
+    checkFinite(deposit.anchorRemaining, `${at}.anchorRemaining`);
+    checkFinite(deposit.anchorTime, `${at}.anchorTime`);
+    checkFinite(deposit.depletionRate, `${at}.depletionRate`);
+    checkFinite(deposit.eventSeq, `${at}.eventSeq`);
+  });
   checkTable(doc.extractors, "extractors", (extractor, at) => {
     checkFinite(extractor.rate, `${at}.rate`);
+    checkFinite(extractor.depositId, `${at}.depositId`);
+    if (!depositIds.has(extractor.depositId)) {
+      throw invalid(`${at}.depositId ${extractor.depositId} has no deposit`);
+    }
     checkFinite(extractor.warehouseId, `${at}.warehouseId`);
     if (!warehouseIds.has(extractor.warehouseId)) {
       throw invalid(`${at}.warehouseId ${extractor.warehouseId} has no warehouse`);
@@ -152,11 +201,14 @@ function validateDocument(doc: SaveDocument): void {
     if (!(event.kind in EVENT_KIND_PRIORITY)) {
       throw invalid(`event.kind ${String(event.kind)} is not an event kind`);
     }
-    // Both current kinds target a warehouse (sim.ts dispatch); a dangling entityId
-    // would throw from getWarehouse inside advance() and serializeState().
+    // Dangling entityIds would throw from a table getter inside a later advance() or
+    // serializeState(); each kind targets its owning table (sim.ts dispatch).
     checkFinite(event.entityId, "event.entityId");
-    if (!warehouseIds.has(event.entityId)) {
-      throw invalid(`event.entityId ${event.entityId} has no warehouse`);
+    const ownerIds = event.kind === "deposit-tier-depleted" ? depositIds : warehouseIds;
+    if (!ownerIds.has(event.entityId)) {
+      throw invalid(
+        `event.entityId ${event.entityId} has no ${event.kind === "deposit-tier-depleted" ? "deposit" : "warehouse"}`,
+      );
     }
   }
 }
@@ -181,5 +233,6 @@ export function deserializeState(doc: SaveDocument): SimState {
     events,
     extractors: entriesToTable(doc.extractors),
     warehouses: entriesToTable(doc.warehouses),
+    deposits: entriesToTable(doc.deposits, copyDeposit),
   };
 }

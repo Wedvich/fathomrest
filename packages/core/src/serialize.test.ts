@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { offlineElapsedSeconds } from "./clock.ts";
+import { getDeposit } from "./components/deposit.ts";
 import { peekEvent } from "./events.ts";
 import { idFromNumber } from "./ids.ts";
 import {
@@ -11,6 +12,7 @@ import {
   type SaveDocument,
 } from "./serialize.ts";
 import {
+  addDeposit,
   addExtractor,
   addWarehouse,
   advance,
@@ -19,20 +21,26 @@ import {
 } from "./sim.ts";
 import { createSimState, type SimState } from "./state.ts";
 
-function midFlightState(): { state: SimState; warehouseId: ReturnType<typeof addWarehouse> } {
+function midFlightState(): {
+  state: SimState;
+  warehouseId: ReturnType<typeof addWarehouse>;
+  depositId: ReturnType<typeof addDeposit>;
+} {
   const state = createSimState(11, 1_000);
   const warehouseId = addWarehouse(state, 0, 100);
-  addExtractor(state, 0, 2, warehouseId);
+  // Tier large enough that the crossing stays pending through every test horizon.
+  const depositId = addDeposit(state, 0, [{ amount: 1_000, multiplier: 1 }], 0.25);
+  addExtractor(state, 0, 2, depositId, warehouseId);
   setWarehousePullRate(state, 0, warehouseId, 0.5);
-  advance(state, 20); // mid-fill, crossing event still pending
-  return { state, warehouseId };
+  advance(state, 20); // mid-fill, mid-tier; both crossing events still pending
+  return { state, warehouseId, depositId };
 }
 
 describe("serializer", () => {
   it("round-trips the Map tables through entry arrays", () => {
     const table = new Map([
-      [idFromNumber(1), { rate: 2, warehouseId: idFromNumber(9) }],
-      [idFromNumber(3), { rate: 5, warehouseId: idFromNumber(9) }],
+      [idFromNumber(1), { rate: 2, depositId: idFromNumber(7), warehouseId: idFromNumber(9) }],
+      [idFromNumber(3), { rate: 5, depositId: idFromNumber(7), warehouseId: idFromNumber(9) }],
     ]);
     const restored = entriesToTable(tableToEntries(table));
     expect(restored).toStrictEqual(table);
@@ -40,10 +48,13 @@ describe("serializer", () => {
   });
 
   it("copies components and events so the document never aliases live state", () => {
-    const { state, warehouseId } = midFlightState();
+    const { state, warehouseId, depositId } = midFlightState();
     const pending = peekEvent(state.events);
     const doc = serializeState(state);
     expect(doc.events[0]).not.toBe(pending);
+    // Nested tier arrays are deep-copied, not shared references.
+    const depositEntry = doc.deposits.find(([id]) => id === depositId);
+    expect(depositEntry?.[1].tiers).not.toBe(getDeposit(state, depositId).tiers);
     advance(state, 500); // fires the fill event, mutates live components
     const entry = doc.warehouses.find(([id]) => id === warehouseId);
     expect(entry?.[1].regime).toBe("tracking");
@@ -81,10 +92,30 @@ describe("serializer", () => {
     expect(() => deserializeState({ ...doc, wallTime: Number.NaN })).toThrow(/wallTime/);
   });
 
-  it("rejects an event referencing a missing warehouse", () => {
+  it("rejects an event referencing a missing entity", () => {
     const doc = serializeState(midFlightState().state);
     const events = doc.events.map((event) => ({ ...event, entityId: idFromNumber(999) }));
     expect(() => deserializeState({ ...doc, events })).toThrow(/entityId/);
+  });
+
+  it("rejects an extractor referencing a missing deposit", () => {
+    const doc = serializeState(midFlightState().state);
+    const extractors = doc.extractors.map(([id, extractor]): (typeof doc.extractors)[number] => [
+      id,
+      { ...extractor, depositId: idFromNumber(999) },
+    ]);
+    expect(() => deserializeState({ ...doc, extractors })).toThrow(/depositId/);
+  });
+
+  it("rejects a deposit with an out-of-range or fractional tier index", () => {
+    const doc = serializeState(midFlightState().state);
+    for (const tierIndex of [-1, 0.5, 2]) {
+      const deposits = doc.deposits.map(([id, deposit]): (typeof doc.deposits)[number] => [
+        id,
+        { ...deposit, tierIndex },
+      ]);
+      expect(() => deserializeState({ ...doc, deposits })).toThrow(/tierIndex/);
+    }
   });
 
   it("rejects a structurally truncated document", () => {

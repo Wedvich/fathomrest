@@ -1,17 +1,19 @@
 import type { Id } from "../ids.ts";
 import type { SimState } from "../state.ts";
 
-// Toy-chain producer: pushes `rate` units/s into its warehouse. Exists only to exercise
-// the engine plumbing (TODO.md); real mechanics replace it once the spine is green.
+// Producer: draws from its deposit into its warehouse. Nominal draw is `rate`; the
+// actual draw is scaled by the deposit's active tier multiplier and throttled while
+// the warehouse is pinned-full (sim.ts: extractorEffectiveRate).
 export interface Extractor {
   rate: number;
+  depositId: Id;
   warehouseId: Id;
 }
 
 // All creation goes through the factory so every instance has one shape
 // (docs/browser-performance.md: stable shapes).
-export function createExtractor(rate: number, warehouseId: Id): Extractor {
-  return { rate, warehouseId };
+export function createExtractor(rate: number, depositId: Id, warehouseId: Id): Extractor {
+  return { rate, depositId, warehouseId };
 }
 
 // Table accessors — the only way core code touches the extractor table. Iteration order

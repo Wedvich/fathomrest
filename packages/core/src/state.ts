@@ -1,3 +1,4 @@
+import type { Deposit } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import type { Warehouse } from "./components/warehouse.ts";
 import { createEventQueue, type EventQueue } from "./events.ts";
@@ -19,6 +20,7 @@ export interface SimState {
   events: EventQueue;
   extractors: Map<Id, Extractor>;
   warehouses: Map<Id, Warehouse>;
+  deposits: Map<Id, Deposit>;
 }
 
 export function createSimState(seed: number, wallTimeMs: number): SimState {
@@ -30,6 +32,7 @@ export function createSimState(seed: number, wallTimeMs: number): SimState {
     events: createEventQueue(),
     extractors: new Map(),
     warehouses: new Map(),
+    deposits: new Map(),
   };
 }
 

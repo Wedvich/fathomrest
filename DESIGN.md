@@ -34,6 +34,8 @@ extract, refine, research, and sail out to discover new islands.
 
 - **Deposits deplete to a permanent floor** — a rich phase decays to a small perpetual
   trickle. Depletion urgency without zeroed income. Research can slow decay / raise floors.
+  The "curve" is stepped richness tiers (per-tier rate multiplier over a fixed amount):
+  piecewise-constant rates keep crossings analytic per ADR-0001 §2, no transcendentals.
 - **No prestige, no resets.** Meta-progression is horizontal: settle new islands
   (each bootstraps with finite local resources) while **knowledge accumulates globally
   forever**. Old islands persist as trickle-producers and network nodes.
