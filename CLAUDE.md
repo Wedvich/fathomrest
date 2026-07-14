@@ -55,3 +55,18 @@ Commands (from repo root):
 - `bun run typecheck` — `tsc --noEmit` across both packages.
 - `bun run test` — Vitest across the workspace.
 - `bun run lint` / `bun run format` — oxlint / oxfmt over the repo.
+
+## Merging
+
+`main` requires **linear history** (enforced by a GitHub ruleset) — a merge commit
+can never land on it. Integrate feature branches by fast-forward only:
+
+- Branch off `main` for standalone work (never reuse an unrelated branch).
+- Before merging, rebase the branch onto the latest `main` so it fast-forwards
+  cleanly: `git rebase main` on the branch.
+- Merge locally with `git merge --ff-only <branch>` from `main`, then `git push`.
+  No PR is required; SHAs are preserved. A non-FF merge (`git merge` producing a
+  merge commit) will be rejected on push.
+- Don't use GitHub's PR merge button — its methods either add a merge commit
+  (blocked) or rewrite SHAs (rebase/squash). Merge from the CLI instead.
+- Push over SSH (the keychain HTTPS token is read-only).
