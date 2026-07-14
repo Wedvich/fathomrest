@@ -17,6 +17,11 @@ import { allocId, type SimState } from "./state.ts";
 // advance(t): pop and apply every event due <= t, rescheduling as regimes change.
 // Mutates state; usually a per-frame no-op. Never moves epoch backwards.
 export function advance(state: SimState, t: number): void {
+  // NaN satisfies neither the loop exit nor the epoch bump below — every queued event
+  // would fire prematurely. Fail loudly, like the command validators.
+  if (!Number.isFinite(t)) {
+    throw new Error(`advance time must be finite, got ${t}`);
+  }
   for (;;) {
     const next = peekEvent(state.events);
     if (next === null || next.time > t) {
@@ -48,6 +53,8 @@ function handleEvent(state: SimState, event: SimEvent): void {
   deriveWarehouseRegime(state, event.entityId, warehouse);
 }
 
+// Derive-time only: scans the extractor table. Queries read the cached
+// warehouse.inflow instead (query(t) must not allocate or scan).
 function totalInflow(state: SimState, warehouseId: Id): number {
   let inflow = 0;
   forEachExtractor(state, (_id, extractor) => {
@@ -62,7 +69,8 @@ function totalInflow(state: SimState, warehouseId: Id): number {
 // re-anchored the warehouse at the current time first.
 function deriveWarehouseRegime(state: SimState, id: Id, warehouse: Warehouse): void {
   warehouse.eventSeq += 1; // invalidates any scheduled crossing for this warehouse
-  const net = totalInflow(state, id) - warehouse.pullRate;
+  warehouse.inflow = totalInflow(state, id);
+  const net = warehouse.inflow - warehouse.pullRate;
   const amount = warehouse.anchorAmount;
   if (amount >= warehouse.capacity && net >= 0) {
     // Saturation: amount pinned at cap, producers throttled to consumer pull.
@@ -122,7 +130,7 @@ export function extractorEffectiveRate(state: SimState, id: Id): number {
     return extractor.rate;
   }
   // Producers share the consumer's pull proportionally while saturated.
-  const inflow = totalInflow(state, extractor.warehouseId);
+  const inflow = warehouse.inflow;
   return inflow <= 0 ? 0 : extractor.rate * (warehouse.pullRate / inflow);
 }
 
@@ -131,17 +139,19 @@ export function warehouseOutflowRate(state: SimState, id: Id): number {
   if (warehouse.regime !== "pinned-empty") {
     return warehouse.pullRate;
   }
-  return Math.min(warehouse.pullRate, totalInflow(state, id));
+  return Math.min(warehouse.pullRate, warehouse.inflow);
 }
 
-// Commands (ADR-0001 implementation notes): validate -> mutate -> re-derive rates ->
-// reschedule. They land at state.epoch; callers advance() to the command time first.
+// Commands (ADR-0001 implementation notes): validate -> advance to the command time ->
+// mutate -> re-derive rates -> reschedule. Taking t and advancing internally makes
+// "commands land at the current time" a mechanism, not a caller convention.
 // Version bump + save are app-layer concerns once the UI binding exists.
 
-export function addWarehouse(state: SimState, capacity: number): Id {
+export function addWarehouse(state: SimState, t: number, capacity: number): Id {
   if (!(capacity > 0)) {
     throw new Error(`warehouse capacity must be > 0, got ${capacity}`);
   }
+  advance(state, t);
   const id = allocId(state);
   const warehouse = createWarehouse(capacity, state.epoch);
   setWarehouse(state, id, warehouse);
@@ -149,11 +159,12 @@ export function addWarehouse(state: SimState, capacity: number): Id {
   return id;
 }
 
-export function addExtractor(state: SimState, rate: number, warehouseId: Id): Id {
+export function addExtractor(state: SimState, t: number, rate: number, warehouseId: Id): Id {
   if (!(rate >= 0)) {
     throw new Error(`extractor rate must be >= 0, got ${rate}`);
   }
   const warehouse = getWarehouse(state, warehouseId); // validates the target exists
+  advance(state, t);
   const id = allocId(state);
   setExtractor(state, id, createExtractor(rate, warehouseId));
   reanchorWarehouse(warehouse, state.epoch);
@@ -161,11 +172,12 @@ export function addExtractor(state: SimState, rate: number, warehouseId: Id): Id
   return id;
 }
 
-export function setWarehousePullRate(state: SimState, id: Id, pullRate: number): void {
+export function setWarehousePullRate(state: SimState, t: number, id: Id, pullRate: number): void {
   if (!(pullRate >= 0)) {
     throw new Error(`pull rate must be >= 0, got ${pullRate}`);
   }
   const warehouse = getWarehouse(state, id);
+  advance(state, t);
   reanchorWarehouse(warehouse, state.epoch);
   warehouse.pullRate = pullRate;
   deriveWarehouseRegime(state, id, warehouse);

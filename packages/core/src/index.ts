@@ -1,36 +1,25 @@
 // @fathomrest/core — headless simulation engine (ADR-0001). Pure TS, no UI deps;
 // event-driven analytic core: advance(t) applies due events, queries evaluate closed
 // forms at exact time t.
+//
+// Only the command/query/serialize surface is public. Mutating internals (table
+// setters, event queue ops, PRNG steppers) stay package-private: going around the
+// command layer skips eventSeq invalidation and breaks replay determinism.
 
-export { idFromNumber, type Id } from "./ids.ts";
-export { createPrng, nextFloat01, nextU32, type PrngState } from "./prng.ts";
+export type { Id } from "./ids.ts";
+export type { PrngState } from "./prng.ts";
 export { offlineElapsedSeconds } from "./clock.ts";
+export type { EventKind, EventQueue, SimEvent } from "./events.ts";
+export { createSimState, type SimState } from "./state.ts";
 export {
-  allEvents,
-  compareEvents,
-  createEventQueue,
-  EVENT_KIND_PRIORITY,
-  peekEvent,
-  popEvent,
-  pushEvent,
-  type EventKind,
-  type EventQueue,
-  type SimEvent,
-} from "./events.ts";
-export { allocId, createSimState, type SimState } from "./state.ts";
-export {
-  createExtractor,
   extractorIds,
   forEachExtractor,
   getExtractor,
-  setExtractor,
   type Extractor,
 } from "./components/extractor.ts";
 export {
-  createWarehouse,
   forEachWarehouse,
   getWarehouse,
-  setWarehouse,
   warehouseIds,
   type Warehouse,
   type WarehouseRegime,
@@ -40,16 +29,13 @@ export {
   addWarehouse,
   advance,
   extractorEffectiveRate,
-  isStaleEvent,
   setWarehousePullRate,
   warehouseAmountAt,
   warehouseOutflowRate,
 } from "./sim.ts";
 export {
   deserializeState,
-  entriesToTable,
   serializeState,
-  tableToEntries,
   type SaveDocument,
   type TableEntries,
 } from "./serialize.ts";

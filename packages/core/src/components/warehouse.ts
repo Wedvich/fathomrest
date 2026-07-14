@@ -4,7 +4,8 @@ import type { SimState } from "../state.ts";
 // Piecewise regime between events (ADR-0001 §2: saturation is a regime, not an
 // oscillation). "tracking" follows the closed form; pinned regimes hold the boundary
 // value with producers/consumers throttled, generating no event churn.
-export type WarehouseRegime = "tracking" | "pinned-full" | "pinned-empty";
+export const WAREHOUSE_REGIMES = ["tracking", "pinned-full", "pinned-empty"] as const;
+export type WarehouseRegime = (typeof WAREHOUSE_REGIMES)[number];
 
 export interface Warehouse {
   capacity: number;
@@ -14,6 +15,9 @@ export interface Warehouse {
   anchorAmount: number;
   anchorTime: number;
   netRate: number;
+  // Total producer rate into this warehouse. Cached on every regime re-derivation so
+  // rate queries stay allocation-free (docs/browser-performance.md: query hot path).
+  inflow: number;
   // Consumer demand; actual outflow is throttled to inflow while pinned-empty.
   pullRate: number;
   regime: WarehouseRegime;
@@ -28,6 +32,7 @@ export function createWarehouse(capacity: number, anchorTime: number): Warehouse
     anchorAmount: 0,
     anchorTime,
     netRate: 0,
+    inflow: 0,
     pullRate: 0,
     regime: "tracking",
     eventSeq: 0,

@@ -3,8 +3,8 @@ import { addExtractor, addWarehouse, createSimState, warehouseAmountAt } from "@
 // Placeholder proof that the app consumes the sim core. The real rAF ->
 // advance(t)/query(t) wiring lands once the core surface stabilizes (TODO.md).
 const state = createSimState(1, Date.now());
-const warehouseId = addWarehouse(state, 100);
-addExtractor(state, 2, warehouseId);
+const warehouseId = addWarehouse(state, 0, 100);
+addExtractor(state, 0, 2, warehouseId);
 
 export function App(): React.JSX.Element {
   return (

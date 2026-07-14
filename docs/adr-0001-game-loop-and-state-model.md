@@ -147,10 +147,13 @@ identical state. The only irreplaceable data is player input. Therefore:
 - **Event ordering**: same-timestamp events resolve by a deterministic tiebreak
   (event kind priority, then entity id) so online and offline replay identically.
 - **Commands** (build, research pick, outfit expedition, mid-voyage decision) are
-  synchronous calls into the core: validate → mutate state → re-derive rates →
-  reschedule affected events → bump version → save. Commands are online-only by
-  nature; the event queue simply has no next event while a voyage waits on a decision,
-  so an absent player's voyage holds at the decision point.
+  synchronous calls into the core, each taking the command time `t` and advancing to
+  it internally: validate → advance(t) → mutate state → re-derive rates → reschedule
+  affected events → bump version → save. The internal advance makes "commands land at
+  the current time" a mechanism rather than a caller convention — a forgotten
+  `advance()` would silently backdate the change. Commands are online-only by nature;
+  the event queue simply has no next event while a voyage waits on a decision, so an
+  absent player's voyage holds at the decision point.
 - **Event rescheduling** is the real complexity budget: when an event fires or a
   command lands, downstream rates change and their scheduled events must be
   invalidated/recomputed. The dependency graph stays tractable because refinement

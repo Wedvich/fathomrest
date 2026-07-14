@@ -19,9 +19,9 @@ function toyChain(): {
   extractorId: ReturnType<typeof addExtractor>;
 } {
   const state = createSimState(42, 0);
-  const warehouseId = addWarehouse(state, 100);
-  const extractorId = addExtractor(state, 2, warehouseId);
-  setWarehousePullRate(state, warehouseId, 0.5);
+  const warehouseId = addWarehouse(state, 0, 100);
+  const extractorId = addExtractor(state, 0, 2, warehouseId);
+  setWarehousePullRate(state, 0, warehouseId, 0.5);
   return { state, warehouseId, extractorId };
 }
 
@@ -49,7 +49,7 @@ describe("toy chain", () => {
   it("drains out of saturation when pull exceeds inflow, then pins empty", () => {
     const { state, warehouseId, extractorId } = toyChain();
     advance(state, 100);
-    setWarehousePullRate(state, warehouseId, 3); // net -1 from a full 100
+    setWarehousePullRate(state, 100, warehouseId, 3); // net -1 from a full 100
     expect(getWarehouse(state, warehouseId).regime).toBe("tracking");
     expect(warehouseAmountAt(state, warehouseId, 150)).toBe(50);
     advance(state, 300); // empty event at 100 + 100/1 = 200s
@@ -63,12 +63,20 @@ describe("toy chain", () => {
 
   it("invalidates a scheduled crossing when a command changes the rates", () => {
     const { state, warehouseId } = toyChain();
-    advance(state, 30); // amount 45, fill still scheduled for 66.67s
-    setWarehousePullRate(state, warehouseId, 2); // net 0: crossing never happens
+    setWarehousePullRate(state, 30, warehouseId, 2); // amount 45, net 0: crossing never happens
+    expect(state.epoch).toBe(30); // the command advanced to its own time first
     advance(state, 1_000_000);
     const warehouse = getWarehouse(state, warehouseId);
     expect(warehouse.regime).toBe("tracking");
     expect(warehouseAmountAt(state, warehouseId, 1_000_000)).toBe(45);
+  });
+
+  it("rejects a non-finite advance time instead of draining the queue", () => {
+    const { state, warehouseId } = toyChain();
+    expect(() => advance(state, Number.NaN)).toThrow(/finite/);
+    expect(() => advance(state, Number.POSITIVE_INFINITY)).toThrow(/finite/);
+    expect(getWarehouse(state, warehouseId).regime).toBe("tracking");
+    expect(state.epoch).toBe(0);
   });
 });
 
@@ -80,9 +88,9 @@ describe("determinism", () => {
   // (ADR-0001 §5, §8, consequences).
   function runScenario(stepCount: number): SaveDocument {
     const state = createSimState(7, 0);
-    const warehouseId = addWarehouse(state, 500);
-    addExtractor(state, 3, warehouseId);
-    setWarehousePullRate(state, warehouseId, 1);
+    const warehouseId = addWarehouse(state, 0, 500);
+    addExtractor(state, 0, 3, warehouseId);
+    setWarehousePullRate(state, 0, warehouseId, 1);
     const commands: readonly (readonly [number, number])[] = [
       [40_000, 5], // drain toward empty
       [90_000, 0.25], // refill toward full
@@ -95,8 +103,7 @@ describe("determinism", () => {
         if (command === undefined || command[0] > t) {
           break;
         }
-        advance(state, command[0]);
-        setWarehousePullRate(state, warehouseId, command[1]);
+        setWarehousePullRate(state, command[0], warehouseId, command[1]);
       }
       advance(state, t);
     };
