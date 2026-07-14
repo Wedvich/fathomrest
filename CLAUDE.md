@@ -31,5 +31,27 @@ paced by a research tree. TypeScript, React + PixiJS, headless simulation core.
 - Simulation logic must stay in the headless core package — pure TS, no React/Pixi
   imports, fully unit-testable. Online ticking and offline catch-up share one math
   core; never fork the math.
-- No codebase yet beyond docs. Update this section (layout, commands, conventions)
-  once the workspace is scaffolded.
+
+## Workspace
+
+Bun workspaces. Runtime is the browser; Bun is build-time only (install, workspace
+orchestration). TypeScript 7, ESM throughout.
+
+- `packages/core` — `@fathomrest/core`, the headless sim. Pure TS, zero UI deps
+  (an oxlint `no-restricted-imports` rule blocks react/react-dom/pixi.js here).
+  Exports its `src/index.ts` directly; consumers transpile it, no build step.
+- `packages/app` — `@fathomrest/app`, the React + PixiJS + Vite host. Depends on
+  core; core depends on nothing.
+
+Tooling: **oxlint** (lint) + **oxfmt** (format) — no ESLint/Prettier. **Vitest**
+for tests (`*.test.ts` colocated with source). TS 7's `tsc` is typecheck-only
+(`--noEmit`); Vite/esbuild does the actual transpile.
+
+Commands (from repo root):
+
+- `bun install` — install all workspace deps.
+- `bun run dev` — Vite dev server (run in `packages/app`, or `bun run --filter '@fathomrest/app' dev`).
+- `bun run build` — production build of the app.
+- `bun run typecheck` — `tsc --noEmit` across both packages.
+- `bun run test` — Vitest across the workspace.
+- `bun run lint` / `bun run format` — oxlint / oxfmt over the repo.
