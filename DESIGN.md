@@ -66,11 +66,14 @@ extract, refine, research, and sail out to discover new islands.
   canvas for islands/world map. Vitest for tests.
 - **Headless simulation core**: game logic is a pure TS package, UI-independent and
   fully unit-testable.
-- **Fixed UPS + event-jump catch-up**: online, a fixed-timestep accumulator (render
-  FPS unbounded, ticker driven manually). Offline/catch-up, the same math core
-  analytically computes the next state-change event (warehouse fills, deposit crosses
-  floor, voyage resolves) and jumps to it — a multi-day absence is dozens of jumps,
-  not millions of ticks. Online and offline must share one math core.
+- **Event-driven analytic core, no fixed timestep**: state between events is a
+  closed-form function of time; `advance(t)` jumps event-to-event (warehouse fills,
+  deposit crosses floor, voyage resolves), `query(t)` evaluates exact amounts for
+  rendering — no accumulator, no interpolation. A 16 ms frame, a backgrounded tab,
+  and a multi-day absence are one code path, so online and offline share one math
+  core by construction. New mechanics must pass the analytic litmus test. Full
+  rationale and companion decisions (EC data model, clock, RNG, UI binding,
+  persistence): [ADR-0001](docs/adr-0001-game-loop-and-state-model.md).
 - **Offline progress is full-fidelity**: same rules as online, warehouses fill and jam.
   No reduced offline rates, no time banking.
 - **Local-first persistence**: one serializable save document in IndexedDB with
