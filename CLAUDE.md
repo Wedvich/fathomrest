@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Browser-based hybrid idle/active game: resource extraction across an archipelago,
+**Fathomrest** — browser-based hybrid idle/active game: resource extraction across an archipelago,
 paced by a research tree. TypeScript, React + PixiJS, headless simulation core.
 
 ## Documents

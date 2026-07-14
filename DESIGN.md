@@ -1,6 +1,6 @@
-# Design Document
+# Fathomrest — Design Document
 
-Browser-based hybrid idle/active game about resource extraction across an archipelago,
+**Fathomrest** (working title): browser-based hybrid idle/active game about resource extraction across an archipelago,
 driven by a rich research tree. Free passion project, no monetization.
 
 ## Fantasy & tone
