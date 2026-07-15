@@ -24,6 +24,7 @@ export {
   getExtractor,
   type Extractor,
 } from "./components/extractor.ts";
+export { forEachRoute, getRoute, routeIds, type Route } from "./components/route.ts";
 export {
   forEachWarehouse,
   getWarehouse,
@@ -34,11 +35,14 @@ export {
 export {
   addDeposit,
   addExtractor,
+  addRoute,
   addWarehouse,
   advance,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
+  routeFlow,
+  setRouteCap,
   setWarehousePullRate,
   warehouseAmountAt,
   warehouseOutflowRate,

@@ -15,11 +15,18 @@ export interface Warehouse {
   anchorAmount: number;
   anchorTime: number;
   netRate: number;
-  // Total producer rate into this warehouse. Cached on every regime re-derivation so
-  // rate queries stay allocation-free (docs/browser-performance.md: query hot path).
+  // Total nominal extractor rate into this warehouse (excludes route inflow). Cached on
+  // every regime re-derivation so rate queries stay allocation-free
+  // (docs/browser-performance.md: query hot path).
   inflow: number;
   // Consumer demand; actual outflow is throttled to inflow while pinned-empty.
   pullRate: number;
+  // Water-fill levels from the flow solver, applied in the query hot path. While
+  // pinned-full, each uncapped producer's realized rate is nominal * inflowThrottle;
+  // while pinned-empty, the sink's realized rate is pullRate * outflowThrottle. Both are
+  // 1 outside the corresponding pinned regime.
+  inflowThrottle: number;
+  outflowThrottle: number;
   regime: WarehouseRegime;
   // Bumped on every regime re-derivation; scheduled events carry a snapshot, and a
   // mismatch marks the event stale (lazy deletion).
@@ -34,6 +41,8 @@ export function createWarehouse(capacity: number, anchorTime: number): Warehouse
     netRate: 0,
     inflow: 0,
     pullRate: 0,
+    inflowThrottle: 1,
+    outflowThrottle: 1,
     regime: "tracking",
     eventSeq: 0,
   };

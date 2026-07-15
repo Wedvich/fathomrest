@@ -165,6 +165,22 @@ identical state. The only irreplaceable data is player input. Therefore:
   command lands, downstream rates change and their scheduled events must be
   invalidated/recomputed. The dependency graph stays tractable because refinement
   chains are shallow (1–2 tiers) — a design constraint doing engine work.
+- **Route solver** (transport routes, `sim.ts: solveRoutes`) is where the §Consequences
+  one-way door — "per-tick feedback coupling across entities" — is deliberately kept
+  shut. A route couples its source's and destination's regimes (a full destination backs
+  pressure upstream; a drained source starves downstream), so a warehouse's net rate
+  depends on its neighbours'. This is resolved **once per structural event** over frozen
+  amounts, not continuously per tick: routes are restricted to a **DAG** (self-loops and
+  cycles rejected at the command and import boundaries), and the coupling is settled by a
+  bounded fixed-point — alternating topological sweeps with a capped proportional
+  water-filling split at each saturated warehouse. Because amounts are frozen for the
+  derive, a warehouse is either full or empty or neither (never both), so backpressure
+  and starvation propagate in opposite directions and never reflect; the iteration
+  converges in ≤ 2·N sweeps (a loud guard-throw guards the invariant). Flows are constant
+  between events, so no new event kind is needed — routes ride the existing warehouse
+  fill/empty crossings. The DAG restriction is the concrete price of keeping this bounded
+  and deterministic; a route cycle is circulating flow with no acyclic propagation order,
+  the exact per-tick feedback loop the ADR forbids.
 
 ## Consequences
 

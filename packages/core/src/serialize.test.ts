@@ -14,8 +14,10 @@ import {
 import {
   addDeposit,
   addExtractor,
+  addRoute,
   addWarehouse,
   advance,
+  routeFlow,
   setWarehousePullRate,
   warehouseAmountAt,
 } from "./sim.ts";
@@ -116,6 +118,107 @@ describe("serializer", () => {
       ]);
       expect(() => deserializeState({ ...doc, deposits })).toThrow(/tierIndex/);
     }
+  });
+
+  it("round-trips a route network and re-derives identical flows", () => {
+    const state = createSimState(5, 0);
+    const source = addWarehouse(state, 0, 100);
+    const dest = addWarehouse(state, 0, 100);
+    const deposit = addDeposit(state, 0, [], 1);
+    addExtractor(state, 0, 5, deposit, source);
+    const route = addRoute(state, 0, source, dest, 3);
+    advance(state, 10);
+
+    const restored = deserializeState(serializeState(state));
+    expect(routeFlow(restored, route)).toBe(routeFlow(state, route));
+    expect(serializeState(restored)).toStrictEqual(serializeState(state));
+  });
+
+  function routeDoc(): SaveDocument {
+    const state = createSimState(5, 0);
+    const source = addWarehouse(state, 0, 100);
+    const dest = addWarehouse(state, 0, 100);
+    addRoute(state, 0, source, dest, 3);
+    return serializeState(state);
+  }
+
+  it("rejects a route referencing a missing warehouse", () => {
+    const doc = routeDoc();
+    const routes = doc.routes.map(([id, route]): (typeof doc.routes)[number] => [
+      id,
+      { ...route, dstId: idFromNumber(999) },
+    ]);
+    expect(() => deserializeState({ ...doc, routes })).toThrow(/dstId/);
+  });
+
+  it("rejects a self-loop route", () => {
+    const doc = routeDoc();
+    const routes = doc.routes.map(([id, route]): (typeof doc.routes)[number] => [
+      id,
+      { ...route, dstId: route.srcId },
+    ]);
+    expect(() => deserializeState({ ...doc, routes })).toThrow(/differ/);
+  });
+
+  it("rejects a cyclic imported route graph", () => {
+    const doc = routeDoc();
+    const [firstEntry] = doc.routes;
+    if (firstEntry === undefined) {
+      throw new Error("routeDoc should produce one route");
+    }
+    const [, route] = firstEntry;
+    // Add the reverse edge to close a 2-cycle.
+    const reverse: (typeof doc.routes)[number] = [
+      idFromNumber(500),
+      { ...route, srcId: route.dstId, dstId: route.srcId },
+    ];
+    const routes = [...doc.routes, reverse];
+    expect(() => deserializeState({ ...doc, routes })).toThrow(/cycle/);
+  });
+
+  it("rejects a negative route cap", () => {
+    const doc = routeDoc();
+    const routes = doc.routes.map(([id, route]): (typeof doc.routes)[number] => [
+      id,
+      { ...route, cap: -5 },
+    ]);
+    expect(() => deserializeState({ ...doc, routes })).toThrow(/cap/);
+  });
+
+  it("rejects a non-positive warehouse capacity", () => {
+    const doc = serializeState(midFlightState().state);
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, capacity: -10 },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/capacity/);
+  });
+
+  it("rejects a negative warehouse pull rate", () => {
+    const doc = serializeState(midFlightState().state);
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, pullRate: -1 },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/pullRate/);
+  });
+
+  it("rejects a warehouse amount outside [0, capacity]", () => {
+    const doc = serializeState(midFlightState().state);
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, anchorAmount: warehouse.capacity + 1 },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/anchorAmount/);
+  });
+
+  it("rejects a negative extractor rate", () => {
+    const doc = serializeState(midFlightState().state);
+    const extractors = doc.extractors.map(([id, extractor]): (typeof doc.extractors)[number] => [
+      id,
+      { ...extractor, rate: -2 },
+    ]);
+    expect(() => deserializeState({ ...doc, extractors })).toThrow(/rate/);
   });
 
   it("rejects a structurally truncated document", () => {

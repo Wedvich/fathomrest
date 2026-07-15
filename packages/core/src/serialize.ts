@@ -1,5 +1,6 @@
 import type { Deposit, DepositTier } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
+import type { Route } from "./components/route.ts";
 import { WAREHOUSE_REGIMES, type Warehouse } from "./components/warehouse.ts";
 import {
   allEvents,
@@ -8,6 +9,7 @@ import {
   pushEvent,
   type SimEvent,
 } from "./events.ts";
+import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
 import type { PrngState } from "./prng.ts";
 import { isStaleEvent } from "./sim.ts";
@@ -31,6 +33,7 @@ export interface SaveDocument {
   extractors: TableEntries<Extractor>;
   warehouses: TableEntries<Warehouse>;
   deposits: TableEntries<Deposit>;
+  routes: TableEntries<Route>;
 }
 
 // Tables and events are copied in both directions so a save document never aliases
@@ -84,6 +87,7 @@ export function serializeState(state: SimState): SaveDocument {
     extractors: tableToEntries(state.extractors),
     warehouses: tableToEntries(state.warehouses),
     deposits: tableToEntries(state.deposits, copyDeposit),
+    routes: tableToEntries(state.routes),
   };
 }
 
@@ -98,6 +102,23 @@ function invalid(detail: string): Error {
 function checkFinite(value: number, field: string): void {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw invalid(`${field} must be a finite number`);
+  }
+}
+
+// Sign/range mirrors of the command-boundary validators (sim.ts). Without them a
+// hand-edited save with e.g. a negative cap or capacity imports cleanly and then feeds the
+// solver reversed flows or a warehouse whose amount clamps to a negative floor forever.
+function checkNonNegative(value: number, field: string): void {
+  checkFinite(value, field);
+  if (value < 0) {
+    throw invalid(`${field} must be >= 0`);
+  }
+}
+
+function checkPositive(value: number, field: string): void {
+  checkFinite(value, field);
+  if (!(value > 0)) {
+    throw invalid(`${field} must be > 0`);
   }
 }
 
@@ -128,6 +149,22 @@ function checkTable<T extends object>(
   return ids;
 }
 
+// The solver requires an acyclic route graph. Reuse the same iterative Kahn sort the
+// solver and command boundary use (graph.ts) — no recursion, so a deep hand-edited chain
+// can't overflow the stack. A null result means the edges contain a cycle.
+function checkRoutesAcyclic(routes: TableEntries<Route>): void {
+  const nodes = new Set<Id>();
+  const edges: [Id, Id][] = [];
+  for (const [, route] of routes) {
+    nodes.add(route.srcId);
+    nodes.add(route.dstId);
+    edges.push([route.srcId, route.dstId]);
+  }
+  if (topoSort([...nodes], edges) === null) {
+    throw invalid("routes form a cycle");
+  }
+}
+
 function validateDocument(doc: SaveDocument): void {
   checkFinite(doc.epoch, "epoch");
   checkFinite(doc.wallTime, "wallTime");
@@ -140,12 +177,17 @@ function validateDocument(doc: SaveDocument): void {
   checkFinite(doc.prng.c, "prng.c");
   checkFinite(doc.prng.d, "prng.d");
   const warehouseIds = checkTable(doc.warehouses, "warehouses", (warehouse, at) => {
-    checkFinite(warehouse.capacity, `${at}.capacity`);
+    checkPositive(warehouse.capacity, `${at}.capacity`);
     checkFinite(warehouse.anchorAmount, `${at}.anchorAmount`);
+    if (warehouse.anchorAmount < 0 || warehouse.anchorAmount > warehouse.capacity) {
+      throw invalid(`${at}.anchorAmount must be in [0, capacity]`);
+    }
     checkFinite(warehouse.anchorTime, `${at}.anchorTime`);
     checkFinite(warehouse.netRate, `${at}.netRate`);
     checkFinite(warehouse.inflow, `${at}.inflow`);
-    checkFinite(warehouse.pullRate, `${at}.pullRate`);
+    checkNonNegative(warehouse.pullRate, `${at}.pullRate`);
+    checkFinite(warehouse.inflowThrottle, `${at}.inflowThrottle`);
+    checkFinite(warehouse.outflowThrottle, `${at}.outflowThrottle`);
     checkFinite(warehouse.eventSeq, `${at}.eventSeq`);
     if (!WAREHOUSE_REGIMES.includes(warehouse.regime)) {
       throw invalid(`${at}.regime must be one of ${WAREHOUSE_REGIMES.join(", ")}`);
@@ -179,7 +221,7 @@ function validateDocument(doc: SaveDocument): void {
     checkFinite(deposit.eventSeq, `${at}.eventSeq`);
   });
   checkTable(doc.extractors, "extractors", (extractor, at) => {
-    checkFinite(extractor.rate, `${at}.rate`);
+    checkNonNegative(extractor.rate, `${at}.rate`);
     checkFinite(extractor.depositId, `${at}.depositId`);
     if (!depositIds.has(extractor.depositId)) {
       throw invalid(`${at}.depositId ${extractor.depositId} has no deposit`);
@@ -189,6 +231,24 @@ function validateDocument(doc: SaveDocument): void {
       throw invalid(`${at}.warehouseId ${extractor.warehouseId} has no warehouse`);
     }
   });
+  checkTable(doc.routes, "routes", (route, at) => {
+    checkFinite(route.srcId, `${at}.srcId`);
+    if (!warehouseIds.has(route.srcId)) {
+      throw invalid(`${at}.srcId ${route.srcId} has no warehouse`);
+    }
+    checkFinite(route.dstId, `${at}.dstId`);
+    if (!warehouseIds.has(route.dstId)) {
+      throw invalid(`${at}.dstId ${route.dstId} has no warehouse`);
+    }
+    if (route.srcId === route.dstId) {
+      throw invalid(`${at} source and destination must differ`);
+    }
+    checkNonNegative(route.cap, `${at}.cap`);
+    checkNonNegative(route.flow, `${at}.flow`);
+  });
+  // The solver's convergence bound rests on an acyclic route graph; a hand-edited save
+  // with a cycle would otherwise throw deep inside a later advance(). Reject it here.
+  checkRoutesAcyclic(doc.routes);
   if (!Array.isArray(doc.events)) {
     throw invalid("events must be an array");
   }
@@ -234,5 +294,6 @@ export function deserializeState(doc: SaveDocument): SimState {
     extractors: entriesToTable(doc.extractors),
     warehouses: entriesToTable(doc.warehouses),
     deposits: entriesToTable(doc.deposits, copyDeposit),
+    routes: entriesToTable(doc.routes),
   };
 }

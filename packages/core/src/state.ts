@@ -1,5 +1,6 @@
 import type { Deposit } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
+import type { Route } from "./components/route.ts";
 import type { Warehouse } from "./components/warehouse.ts";
 import { createEventQueue, type EventQueue } from "./events.ts";
 import { idFromNumber, type Id } from "./ids.ts";
@@ -21,6 +22,7 @@ export interface SimState {
   extractors: Map<Id, Extractor>;
   warehouses: Map<Id, Warehouse>;
   deposits: Map<Id, Deposit>;
+  routes: Map<Id, Route>;
 }
 
 export function createSimState(seed: number, wallTimeMs: number): SimState {
@@ -33,6 +35,7 @@ export function createSimState(seed: number, wallTimeMs: number): SimState {
     extractors: new Map(),
     warehouses: new Map(),
     deposits: new Map(),
+    routes: new Map(),
   };
 }
 

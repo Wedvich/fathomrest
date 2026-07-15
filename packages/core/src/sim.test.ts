@@ -5,11 +5,14 @@ import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
   addDeposit,
   addExtractor,
+  addRoute,
   addWarehouse,
   advance,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
+  routeFlow,
+  setRouteCap,
   setWarehousePullRate,
   warehouseAmountAt,
   warehouseOutflowRate,
@@ -161,6 +164,127 @@ describe("deposits", () => {
   });
 });
 
+describe("routes", () => {
+  it("carries an instant rate-capped flow between warehouses", () => {
+    const state = createSimState(42, 0);
+    const source = addWarehouse(state, 0, 1_000);
+    const dest = addWarehouse(state, 0, 1_000);
+    const deposit = addDeposit(state, 0, [], 1);
+    addExtractor(state, 0, 5, deposit, source); // source inflow 5/s
+    const route = addRoute(state, 0, source, dest, 3); // cap below inflow, so runs at cap
+
+    expect(routeFlow(state, route)).toBe(3);
+    // Source keeps 5 - 3 = 2/s; dest receives the full 3/s.
+    expect(warehouseAmountAt(state, source, 10)).toBe(20);
+    expect(warehouseAmountAt(state, dest, 10)).toBe(30);
+    advance(state, 10);
+    expect(routeFlow(state, route)).toBe(3);
+  });
+
+  it("backs up the source when the destination jams (backpressure travels upstream)", () => {
+    const state = createSimState(42, 0);
+    const source = addWarehouse(state, 0, 100);
+    const dest = addWarehouse(state, 0, 50);
+    const deposit = addDeposit(state, 0, [], 1);
+    const extractor = addExtractor(state, 0, 20, deposit, source); // ample supply
+    const route = addRoute(state, 0, source, dest, 10);
+    // dest has no consumer, so it fills at the route rate 10/s and jams at t=5.
+
+    advance(state, 6);
+    expect(getWarehouse(state, dest).regime).toBe("pinned-full");
+    expect(warehouseAmountAt(state, dest, 6)).toBe(50);
+    // Backpressure: the jammed dest accepts nothing, so the route stops drawing.
+    expect(routeFlow(state, route)).toBe(0);
+    // The source now keeps its whole 20/s: 50 by t=5, then +20 for the last second.
+    expect(getWarehouse(state, source).regime).toBe("tracking");
+    expect(warehouseAmountAt(state, source, 6)).toBe(70);
+    expect(extractorEffectiveRate(state, extractor)).toBe(20);
+  });
+
+  it("supply-limits the route when the source runs dry (starvation travels downstream)", () => {
+    const state = createSimState(42, 0);
+    const source = addWarehouse(state, 0, 100);
+    const dest = addWarehouse(state, 0, 100);
+    const deposit = addDeposit(state, 0, [], 1);
+    addExtractor(state, 0, 3, deposit, source); // trickle: below the route cap
+    const route = addRoute(state, 0, source, dest, 10);
+    setWarehousePullRate(state, 0, dest, 5); // wants more than the route can supply
+
+    advance(state, 100);
+    // Source is starved: the route carries only what the source produces.
+    expect(getWarehouse(state, source).regime).toBe("pinned-empty");
+    expect(routeFlow(state, route)).toBe(3);
+    // Dest is starved in turn: its consumer is throttled to the arriving 3/s.
+    expect(getWarehouse(state, dest).regime).toBe("pinned-empty");
+    expect(warehouseOutflowRate(state, dest)).toBe(3);
+    expect(warehouseAmountAt(state, source, 100)).toBe(0);
+    expect(warehouseAmountAt(state, dest, 100)).toBe(0);
+  });
+
+  it("splits a demand-limited hub across incoming routes, reflowing a starved one", () => {
+    // P is well-supplied, Q is a trickle; both feed hub D which can only accept its pull.
+    const state = createSimState(42, 0);
+    const p = addWarehouse(state, 0, 100);
+    const q = addWarehouse(state, 0, 100);
+    const hub = addWarehouse(state, 0, 50);
+    const deposit = addDeposit(state, 0, [], 1);
+    addExtractor(state, 0, 20, deposit, p); // P can push its full route cap
+    addExtractor(state, 0, 1, deposit, q); // Q is supply-limited to 1/s
+    const fromP = addRoute(state, 0, p, hub, 10);
+    const fromQ = addRoute(state, 0, q, hub, 10);
+    setWarehousePullRate(state, 0, hub, 3); // hub accepts only 3/s once full
+
+    advance(state, 10_000);
+    expect(getWarehouse(state, hub).regime).toBe("pinned-full");
+    // Q delivers its whole trickle (1); the unclaimed acceptance reflows to P (2) — not a
+    // flat proportional 1.5/1.5, which Q could not sustain.
+    expect(routeFlow(state, fromQ)).toBe(1);
+    expect(routeFlow(state, fromP)).toBe(2);
+    expect(getWarehouse(state, q).regime).toBe("pinned-empty"); // trickle source starved
+    expect(getWarehouse(state, p).regime).toBe("pinned-full"); // backed up by the hub
+  });
+
+  it("un-jams a saturated chain within a single command (cascade resolves in one derive)", () => {
+    // A -> B -> C, sink at C. With C closed, the whole chain jams full.
+    const state = createSimState(42, 0);
+    const a = addWarehouse(state, 0, 100);
+    const b = addWarehouse(state, 0, 100);
+    const c = addWarehouse(state, 0, 100);
+    const deposit = addDeposit(state, 0, [], 1);
+    const extractor = addExtractor(state, 0, 50, deposit, a);
+    const ab = addRoute(state, 0, a, b, 20);
+    const bc = addRoute(state, 0, b, c, 20);
+
+    advance(state, 10_000); // everything fills and jams
+    expect(getWarehouse(state, a).regime).toBe("pinned-full");
+    expect(getWarehouse(state, b).regime).toBe("pinned-full");
+    expect(getWarehouse(state, c).regime).toBe("pinned-full");
+    expect(routeFlow(state, ab)).toBe(0);
+    expect(routeFlow(state, bc)).toBe(0);
+
+    // One command opens C's sink; the un-jam must propagate C -> B -> A in this derive.
+    setWarehousePullRate(state, 10_000, c, 5);
+    expect(routeFlow(state, bc)).toBe(5);
+    expect(routeFlow(state, ab)).toBe(5);
+    expect(extractorEffectiveRate(state, extractor)).toBe(5);
+    // Net zero everywhere: the chain stays full but now flows steadily.
+    expect(getWarehouse(state, a).regime).toBe("pinned-full");
+    expect(getWarehouse(state, b).regime).toBe("pinned-full");
+    expect(getWarehouse(state, c).regime).toBe("pinned-full");
+  });
+
+  it("rejects self-loops and cycles at the command boundary", () => {
+    const state = createSimState(42, 0);
+    const a = addWarehouse(state, 0, 100);
+    const b = addWarehouse(state, 0, 100);
+    expect(() => addRoute(state, 0, a, a, 5)).toThrow(/differ/);
+    addRoute(state, 0, a, b, 5);
+    expect(() => addRoute(state, 0, b, a, 5)).toThrow(/cycle/);
+    expect(() => addRoute(state, 0, a, b, Number.NaN)).toThrow(/cap/);
+    expect(() => addRoute(state, 0, a, b, -1)).toThrow(/cap/);
+  });
+});
+
 describe("determinism", () => {
   const TOTAL_SPAN = 3 * 86_400;
 
@@ -209,5 +333,47 @@ describe("determinism", () => {
     expect(runScenario(10_000)).toStrictEqual(single);
     // Uneven step boundaries hit different intermediate times; result must not care.
     expect(runScenario(3_333)).toStrictEqual(single);
+  });
+
+  // A route network (fan-out A->B, A->C plus chain B->C) with regime flips and a route
+  // re-cap over the span. The solver runs at every event/command epoch, so a coupled
+  // graph must still replay bit-identically across advance granularities.
+  function runRouteScenario(stepCount: number): SaveDocument {
+    const state = createSimState(13, 0);
+    const a = addWarehouse(state, 0, 400);
+    const b = addWarehouse(state, 0, 300);
+    const c = addWarehouse(state, 0, 500);
+    const deposit = addDeposit(state, 0, [{ amount: 50_000, multiplier: 2 }], 0.5);
+    addExtractor(state, 0, 4, deposit, a);
+    const ab = addRoute(state, 0, a, b, 3);
+    addRoute(state, 0, a, c, 2); // fan-out from A
+    addRoute(state, 0, b, c, 2); // and a chain into C
+    setWarehousePullRate(state, 0, c, 1);
+    const commands: readonly (readonly [number, () => void])[] = [
+      [30_000, (): void => setWarehousePullRate(state, 30_000, c, 6)], // open C's sink
+      [80_000, (): void => setRouteCap(state, 80_000, ab, 8)], // widen A->B
+      [150_000, (): void => setWarehousePullRate(state, 150_000, b, 4)], // drain B
+    ];
+    let nextCommand = 0;
+    const advanceTo = (t: number): void => {
+      for (; nextCommand < commands.length; nextCommand += 1) {
+        const command = commands[nextCommand];
+        if (command === undefined || command[0] > t) {
+          break;
+        }
+        command[1]();
+      }
+      advance(state, t);
+    };
+    for (let i = 1; i <= stepCount; i += 1) {
+      advanceTo((i * TOTAL_SPAN) / stepCount);
+    }
+    return serializeState(state);
+  }
+
+  it("replays a coupled route network bit-identically across advance granularities", () => {
+    const single = runRouteScenario(1);
+    expect(runRouteScenario(10_000)).toStrictEqual(single);
+    expect(runRouteScenario(3_333)).toStrictEqual(single);
   });
 });

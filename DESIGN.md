@@ -41,7 +41,12 @@ extract, refine, research, and sail out to discover new islands.
   forever**. Old islands persist as trickle-producers and network nodes.
 - **Transport routes are instant flows with rate caps** ("B pulls from A, max X/min").
   No simulated ships. Geography can be re-weighted later via distance-priced route
-  slots without engine changes; ships are visual flavor only.
+  slots without engine changes; ships are visual flavor only. Routes form a **DAG**
+  (cycles rejected) and support hubs (fan-in/fan-out). A jammed destination backs up
+  its sources and a drained source starves its destinations; that backpressure/
+  starvation resolves within the event that triggers it (ADR-0001 §route solver), so a
+  saturated network jams cleanly for the player to unpick — find the true bottleneck (a
+  route cap, a closed sink, or a dry deposit), not just any full warehouse.
 - Longer refinement chains require networking specialized islands — that is the
   strategy layer.
 
