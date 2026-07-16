@@ -12,11 +12,13 @@ import {
   addWarehouse,
   advance,
   buildExtractor,
+  canAffordBuild,
   converterDraw,
   converterFeed,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
+  grantResource,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
@@ -472,6 +474,84 @@ describe("resource-costed building", () => {
     expect(() => buildExtractor(state, 10, cost, 5, stoneDeposit, quarry)).toThrow(/insufficient/);
     expect(warehouseAmountAt(state, oreA, 10)).toBeCloseTo(40, 9);
     expect(warehouseAmountAt(state, oreB, 10)).toBeCloseTo(20, 9);
+  });
+});
+
+// The wood/stone bootstrap loop the app boots into (packages/app/src/sim/world.ts): a seeded
+// stockpile, no extractors, and cross-resource build costs that gate later builds behind
+// accumulation.
+describe("granted stockpile bootstrap", () => {
+  const wood = resourceType("wood");
+  const stone = resourceType("stone");
+  const home = islandId("home");
+
+  // Two wood + two stone deposits, each with its own empty warehouse; only the "A" warehouses
+  // seeded, mirroring createDemoWorld. Nothing is producing yet.
+  function bootstrap(): {
+    state: SimState;
+    woodA: ReturnType<typeof addWarehouse>;
+    woodB: ReturnType<typeof addWarehouse>;
+    stoneA: ReturnType<typeof addWarehouse>;
+    stoneB: ReturnType<typeof addWarehouse>;
+    woodDepositB: ReturnType<typeof addDeposit>;
+    stoneDepositA: ReturnType<typeof addDeposit>;
+  } {
+    const state = createSimState(1, 0);
+    addDeposit(state, 0, wood, [], 1); // wood deposit A (unworked)
+    const woodDepositB = addDeposit(state, 0, wood, [], 1);
+    const stoneDepositA = addDeposit(state, 0, stone, [], 1);
+    addDeposit(state, 0, stone, [], 1); // stone deposit B (unworked)
+    const woodA = addWarehouse(state, 0, wood, home, 100);
+    const woodB = addWarehouse(state, 0, wood, home, 100);
+    const stoneA = addWarehouse(state, 0, stone, home, 100);
+    const stoneB = addWarehouse(state, 0, stone, home, 100);
+    grantResource(state, 0, woodA, 30);
+    grantResource(state, 0, stoneA, 30);
+    return { state, woodA, woodB, stoneA, stoneB, woodDepositB, stoneDepositA };
+  }
+
+  it("seeds the stockpile with no producer and reflects it in canAffordBuild", () => {
+    const { state, woodA, stoneA } = bootstrap();
+    expect(warehouseAmountAt(state, woodA, 0)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(state, stoneA, 0)).toBeCloseTo(30, 9);
+    // No producer: the seed does not grow over time.
+    expect(warehouseAmountAt(state, woodA, 1_000)).toBeCloseTo(30, 9);
+    // A stone extractor costs 20 wood — affordable now, but 40 wood is not.
+    expect(canAffordBuild(state, 0, home, new Map([[wood, 20]]))).toBe(true);
+    expect(canAffordBuild(state, 0, home, new Map([[wood, 40]]))).toBe(false);
+  });
+
+  it("gates the third build behind accumulation from the first two", () => {
+    const { state, woodA, woodB, stoneA, woodDepositB, stoneDepositA } = bootstrap();
+    // Build both starters at t=0: stone extractor costs 20 wood, wood extractor costs 20 stone.
+    buildExtractor(state, 0, new Map([[wood, 20]]), 1, stoneDepositA, stoneA);
+    buildExtractor(state, 0, new Map([[stone, 20]]), 1, woodDepositB, woodB);
+    // 30 - 20 = 10 of each left; both new extractors now produce 1/s.
+    expect(warehouseAmountAt(state, woodA, 0)).toBeCloseTo(10, 9);
+    expect(warehouseAmountAt(state, stoneA, 0)).toBeCloseTo(10, 9);
+    // A further wood extractor costs 20 stone: not yet affordable, only 10 stone on the island.
+    expect(canAffordBuild(state, 0, home, new Map([[stone, 20]]))).toBe(false);
+    // stoneA accrues 1/s from t=0; by t=10 the island holds 20 stone and the build unlocks.
+    advance(state, 10);
+    expect(warehouseAmountAt(state, stoneA, 10)).toBeCloseTo(20, 9);
+    expect(canAffordBuild(state, 10, home, new Map([[stone, 20]]))).toBe(true);
+    // Sanity: the woodB warehouse (from the earlier build) is filling too.
+    expect(warehouseAmountAt(state, woodB, 10)).toBeCloseTo(10, 9);
+  });
+
+  it("clamps a grant at the warehouse capacity", () => {
+    const state = createSimState(1, 0);
+    const wh = addWarehouse(state, 0, wood, home, 100);
+    grantResource(state, 0, wh, 80);
+    grantResource(state, 0, wh, 50); // would reach 130; capped at 100
+    expect(warehouseAmountAt(state, wh, 0)).toBeCloseTo(100, 9);
+  });
+
+  it("rejects a negative or non-finite grant", () => {
+    const state = createSimState(1, 0);
+    const wh = addWarehouse(state, 0, wood, home, 100);
+    expect(() => grantResource(state, 0, wh, -5)).toThrow(/must be finite and >= 0/);
+    expect(() => grantResource(state, 0, wh, Number.NaN)).toThrow(/must be finite and >= 0/);
   });
 });
 

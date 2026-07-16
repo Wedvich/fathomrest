@@ -1,19 +1,16 @@
 import {
-  addConverter,
   addDeposit,
-  addExtractor,
-  buildExtractor as buildExtractorCmd,
-  addRoute,
   addWarehouse,
   advance,
+  buildExtractor as buildExtractorCmd,
   createSimState,
   deserializeState,
   forEachExtractor,
+  grantResource,
   offlineElapsedSeconds,
   islandId,
   resourceType,
   serializeState,
-  setWarehousePullRate,
   type Id,
   type ResourceType,
   type SaveDocument,
@@ -26,8 +23,7 @@ import {
 export interface DemoWorld {
   state: SimState;
   warehouses: readonly { id: Id; label: string }[];
-  deposits: readonly { id: Id; label: string }[];
-  buildSite: BuildSite;
+  deposits: readonly Deposit[];
   // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or
   // an upgraded restore, higher when a newer app wrote the loaded save. snapshotWorld
   // stamps this (never a lower constant), so a stale service-worker-pinned bundle can't
@@ -35,160 +31,139 @@ export interface DemoWorld {
   contentVersion: number;
 }
 
-// The unworked deposit + its idle warehouse the player builds an extractor onto (the
-// first-interaction loop test). App-level metadata: the target warehouse has no producer
-// until built, so it can't be re-derived from core state — it is carried and persisted.
-export interface BuildSite {
-  readonly depositId: Id;
+// A deposit and everything the app needs to offer it as a build site: the core deposit id,
+// the (initially producer-less) warehouse an extractor would fill, and the build price/rate.
+// This unifies "deposit" and "build site" — a deposit IS the thing you build an extractor on.
+// The warehouse has no producer until built, so this pairing can't be re-derived from core
+// state; it is carried and persisted. `cost` is serializable entries (a Map is built when the
+// core command is called) matching what the core buildExtractor cost vector expects.
+export interface Deposit {
+  readonly id: Id;
   readonly warehouseId: Id;
+  readonly label: string;
+  readonly resource: ResourceType;
+  readonly cost: readonly (readonly [ResourceType, number])[];
+  readonly rate: number;
 }
 
 // App-level save envelope: the canonical core document plus the UI view model (warehouse
-// labels) the core doesn't carry. Persisted as-is (persistence.ts). Kept separate from
-// the core SaveDocument so the sim's serialization never depends on presentation.
+// labels, deposit build-sites) the core doesn't carry. Persisted as-is (persistence.ts). Kept
+// separate from the core SaveDocument so the sim's serialization never depends on presentation.
 export interface SavedWorld {
   doc: SaveDocument;
   warehouses: readonly { id: Id; label: string }[];
-  deposits: readonly { id: Id; label: string }[];
-  buildSite: BuildSite;
+  deposits: readonly Deposit[];
   // App content revision this envelope was written at. Absent on a pre-versioning save
   // (treated as 1). Bumped whenever a WORLD_UPGRADES step is added, so restoreWorld can
   // raise older saves to current.
   contentVersion?: number;
 }
 
+const EXTRACTOR_RATE = 1; // units/s an extractor produces once built
+const WAREHOUSE_CAP = 100;
+const STARTING_STOCK = 30; // seeded into each resource's "A" warehouse at t=0
+const BUILD_COST = 20; // paid in the *other* resource
+
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const state = createSimState(seed, wallTimeMs);
 
-  // Three resource types exercise typing end-to-end: the ore chain (Pier -> Depot route)
-  // stays ore; the Quarry build site is stone; the Foundry holds ingots refined from the
-  // Depot's ore. A route or extractor crossing types is rejected by the core (sim.ts).
-  const ore = resourceType("ore");
+  // Tier-0 economy: wood and stone. Refinement (an ore->ingot tier) is deferred — it returns
+  // later as a tier layered on these, per DESIGN.md.
+  const wood = resourceType("wood");
   const stone = resourceType("stone");
-  const ingot = resourceType("ingot");
-  // Single starting island: all three warehouses share it, so a build here can spend ore
-  // shipped in from the Pier/Depot but never stock parked on another island.
+  // Single starting island: every warehouse shares it, so a build spends only local stock.
   const home = islandId("home");
 
-  // Rich vein that depletes to a lean perpetual floor.
-  const oreDeposit = addDeposit(state, 0, ore, [{ amount: 500, multiplier: 2 }], 0.5);
+  // Cross-dependency: a wood extractor is paid in stone and vice versa, so the first builds
+  // spend the starting stockpile and later ones must wait for the extractors already running
+  // to replenish it. All numbers here are placeholder tuning (DESIGN.md vertical slice).
+  const woodCost: readonly (readonly [ResourceType, number])[] = [[stone, BUILD_COST]];
+  const stoneCost: readonly (readonly [ResourceType, number])[] = [[wood, BUILD_COST]];
 
-  const pierWarehouse = addWarehouse(state, 0, ore, home, 100);
-  const depotWarehouse = addWarehouse(state, 0, ore, home, 200);
+  const makeDeposit = (
+    resource: ResourceType,
+    label: string,
+    cost: readonly (readonly [ResourceType, number])[],
+  ): Deposit => {
+    // Rich vein depleting to a lean perpetual floor (mirrors the earlier placeholder).
+    const id = addDeposit(state, 0, resource, [{ amount: 500, multiplier: 2 }], 0.5);
+    const warehouseId = addWarehouse(state, 0, resource, home, WAREHOUSE_CAP);
+    return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
+  };
 
-  addExtractor(state, 0, 5, oreDeposit, pierWarehouse);
+  // Two deposits per resource, all unworked (no extractor). Building the first of each is
+  // affordable from the starting stockpile; the others gate behind accumulation.
+  const woodA = makeDeposit(wood, "Wood A vein", woodCost);
+  const woodB = makeDeposit(wood, "Wood B vein", woodCost);
+  const stoneA = makeDeposit(stone, "Stone A vein", stoneCost);
+  const stoneB = makeDeposit(stone, "Stone B vein", stoneCost);
 
-  // Unworked vein + its idle warehouse: no extractor until the player builds one, so the
-  // Quarry row sits at zero until the Build command wires a producer (buildExtractor).
-  const graniteDeposit = addDeposit(state, 0, stone, [{ amount: 500, multiplier: 2 }], 0.5);
-  const quarryWarehouse = addWarehouse(state, 0, stone, home, 100);
-
-  // Pier drains a little locally and ships the surplus up the route to the depot.
-  setWarehousePullRate(state, 0, pierWarehouse, 3);
-  addRoute(state, 0, pierWarehouse, depotWarehouse, 4);
-
-  // Refinement slice: a converter smelts the Depot's ore into Foundry ingots — draws up
-  // to 2 ore/s, produces 1 ingot/s (ratio 0.5).
-  const foundryWarehouse = addWarehouse(state, 0, ingot, home, 100);
-  addConverter(state, 0, depotWarehouse, foundryWarehouse, 2, 0.5);
+  // Starting stockpile: enough to build one wood + one stone extractor (BUILD_COST each),
+  // leaving a remainder the next builds must wait for the new extractors to top back up.
+  grantResource(state, 0, woodA.warehouseId, STARTING_STOCK);
+  grantResource(state, 0, stoneA.warehouseId, STARTING_STOCK);
 
   return {
     state,
     warehouses: [
-      { id: pierWarehouse, label: "Pier" },
-      { id: depotWarehouse, label: "Depot" },
-      { id: quarryWarehouse, label: "Quarry" },
-      { id: foundryWarehouse, label: "Foundry" },
+      { id: woodA.warehouseId, label: "Wood A" },
+      { id: woodB.warehouseId, label: "Wood B" },
+      { id: stoneA.warehouseId, label: "Stone A" },
+      { id: stoneB.warehouseId, label: "Stone B" },
     ],
-    deposits: [
-      { id: oreDeposit, label: "Ore vein" },
-      { id: graniteDeposit, label: "Granite vein" },
-    ],
-    buildSite: { depositId: graniteDeposit, warehouseId: quarryWarehouse },
+    deposits: [woodA, woodB, stoneA, stoneB],
     contentVersion: WORLD_CONTENT_VERSION,
   };
 }
 
 // Content upgrades: each step raises a restored world from content version index+1 to
-// index+2 using core commands at the current epoch, and appends any new envelope view
-// models (warehouse/deposit labels the core doesn't carry). restoreWorld gates them by
-// contentVersion, so a step normally runs once — but saves written by the very commit
-// that introduced a step's content predate the version stamp, so every step must also
-// be idempotent: skip when its content is already present. WORLD_CONTENT_VERSION is
-// derived from the list — adding a step bumps the version by construction.
-// createDemoWorld builds at the current version already.
-const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = [
-  upgradeV1AddFoundry,
-];
+// index+2 using core commands at the current epoch, and appends any new envelope view models
+// the core doesn't carry. restoreWorld gates them by contentVersion. WORLD_CONTENT_VERSION is
+// derived from the list — adding a step bumps the version by construction, and createDemoWorld
+// builds at the current version already. The list is empty after the wood/stone pivot (the old
+// ore/ingot upgrade step targeted a world that no longer exists); the next demo-world content
+// change adds the first new step.
+const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = [];
 export const WORLD_CONTENT_VERSION = WORLD_UPGRADES.length + 1;
-
-// v1 -> v2: backfill the refinement slice (commit 82bdbc0) onto pre-refinement saves —
-// an ingot Foundry warehouse fed by a converter smelting the Depot's ore, mirroring
-// createDemoWorld. If the Depot label is missing (hand-edited save) the converter wiring
-// is skipped but the version still advances: a cosmetic content gap must never throw the
-// restore into the quarantine path.
-function upgradeV1AddFoundry(world: DemoWorld, t: number): DemoWorld {
-  // A save written by the refinement commit itself (pre-versioning) already carries the
-  // Foundry — re-running the step must not duplicate it.
-  if (world.warehouses.some((w) => w.label === "Foundry")) return world;
-  const foundry = addWarehouse(world.state, t, resourceType("ingot"), islandId("home"), 100);
-  const depot = world.warehouses.find((w) => w.label === "Depot");
-  if (depot !== undefined) {
-    addConverter(world.state, t, depot.id, foundry, 2, 0.5);
-  }
-  return {
-    ...world,
-    warehouses: [...world.warehouses, { id: foundry, label: "Foundry" }],
-  };
-}
 
 export function snapshotWorld(world: DemoWorld): SavedWorld {
   return {
     doc: serializeState(world.state),
     warehouses: world.warehouses,
     deposits: world.deposits,
-    buildSite: world.buildSite,
     contentVersion: world.contentVersion,
   };
 }
 
-// Nominal draw of the extractor the player builds at the build site.
-const BUILD_EXTRACTOR_RATE = 5;
-
-// Placeholder build price: the stone extractor is paid for in ore, drawn proportionally from
-// every ore warehouse on the build site's island (Pier + Depot). Real prices arrive with the
-// economy pass.
-const BUILD_EXTRACTOR_COST: ReadonlyMap<ResourceType, number> = new Map([
-  [resourceType("ore"), 20],
-]);
-
-export function isExtractorBuilt(world: DemoWorld): boolean {
+// Whether an extractor has already been built on this deposit — the source of truth is core
+// state (a producer wired to the deposit), so it survives a save round-trip without a flag.
+export function isExtractorBuilt(world: DemoWorld, depositId: Id): boolean {
   let built = false;
   forEachExtractor(world.state, (_id, extractor) => {
-    if (extractor.depositId === world.buildSite.depositId) built = true;
+    if (extractor.depositId === depositId) built = true;
   });
   return built;
 }
 
-// The first player command: place an extractor on the build site's deposit at sim time t,
-// paying BUILD_EXTRACTOR_COST from the island's ore stock (core buildExtractor advances to t,
-// debits, then wires the producer, so income begins exactly at t). Idempotent; returns false
-// if already built or the cost can't be met yet (placeholder for an affordability-gated
-// button — the real UI will disable Build until the island can pay).
-export function buildExtractor(world: DemoWorld, t: number): boolean {
-  if (isExtractorBuilt(world)) return false;
+// Build an extractor on a deposit at sim time t, paying its cost from the island's stock (core
+// buildExtractor advances to t, debits, then wires the producer, so income begins exactly at t).
+// Idempotent per deposit; returns false if already built, unknown, or the cost can't be met yet
+// (the UI disables the button until canAffordBuild — this is the backstop).
+export function buildExtractor(world: DemoWorld, depositId: Id, t: number): boolean {
+  const deposit = world.deposits.find((d) => d.id === depositId);
+  if (deposit === undefined || isExtractorBuilt(world, depositId)) return false;
   try {
     buildExtractorCmd(
       world.state,
       t,
-      BUILD_EXTRACTOR_COST,
-      BUILD_EXTRACTOR_RATE,
-      world.buildSite.depositId,
-      world.buildSite.warehouseId,
+      new Map(deposit.cost),
+      deposit.rate,
+      deposit.id,
+      deposit.warehouseId,
     );
     return true;
   } catch {
-    return false; // insufficient stock on the island — retry once ore has accrued
+    return false; // insufficient stock on the island — retry once resources have accrued
   }
 }
 
@@ -196,6 +171,13 @@ export function buildExtractor(world: DemoWorld, t: number): boolean {
 // (offline catch-up, ADR-0001 §4). The saved (epoch, wallTime) pair stays a valid anchor
 // afterward — the next save re-stamps wallTime — so wallTime is left as-is here.
 export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
+  // One-time reset: legacy ore/ingot envelopes carried a singular `buildSite`; the wood/stone
+  // envelope never does, so its presence marks a pre-pivot save. Throw so the caller quarantines
+  // it and boots a fresh world — a blessed exception to the no-reset rule, since the discarded
+  // content was pre-release placeholder (DESIGN.md).
+  if ("buildSite" in saved) {
+    throw new Error("legacy ore/ingot save format; discarding for the wood/stone world");
+  }
   // contentVersion crosses an untrusted boundary (IndexedDB today, export/import later).
   // A malformed value must fail loud into the caller's quarantine path — a negative
   // number would otherwise walk the whole numeric range, a fractional one silently skip
@@ -210,7 +192,6 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
     state,
     warehouses: saved.warehouses,
     deposits: saved.deposits,
-    buildSite: saved.buildSite,
     // max: a save from a newer app keeps its higher version, so re-saving on this stale
     // bundle never downgrades it into re-running the newer app's steps later.
     contentVersion: Math.max(savedVersion, WORLD_CONTENT_VERSION),

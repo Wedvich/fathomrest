@@ -1,218 +1,148 @@
-import {
-  addDeposit,
-  addExtractor,
-  addRoute,
-  addWarehouse,
-  advance,
-  createSimState,
-  islandId,
-  resourceType,
-  serializeState,
-  setWarehousePullRate,
-  warehouseAmountAt,
-} from "@fathomrest/core";
+import { advance, warehouseAmountAt } from "@fathomrest/core";
 import { describe, expect, it } from "vitest";
 
 import {
   buildExtractor,
   createDemoWorld,
+  type DemoWorld,
   isExtractorBuilt,
   restoreWorld,
   snapshotWorld,
   WORLD_CONTENT_VERSION,
-  type SavedWorld,
 } from "./world.ts";
 
-// The first-interaction loop test as a scenario: the build site is idle until the player
-// builds, building starts income at the command time, and the mutation survives a
-// save/reload round-trip (structuredClone stands in for IndexedDB's structured clone,
-// mirroring persistence.ts). Drives the real core commands, no mocks.
-describe("build-extractor interaction", () => {
-  it("quarry stays idle until an extractor is built", () => {
+// The demo world's deposits are ordered [Wood A, Wood B, Stone A, Stone B]; name them (and
+// assert the shape) so the scenarios below read clearly under strict index checking.
+function namedDeposits(world: DemoWorld): {
+  woodA: DemoWorld["deposits"][number];
+  woodB: DemoWorld["deposits"][number];
+  stoneA: DemoWorld["deposits"][number];
+  stoneB: DemoWorld["deposits"][number];
+} {
+  const [woodA, woodB, stoneA, stoneB] = world.deposits;
+  if (!woodA || !woodB || !stoneA || !stoneB) throw new Error("demo world deposit shape changed");
+  return { woodA, woodB, stoneA, stoneB };
+}
+
+// The wood/stone bootstrap as scenarios: the world boots with a seeded stockpile and no
+// extractors, building spends the cross-resource and starts income at the command time, and
+// the mutation survives a save/reload round-trip (structuredClone stands in for IndexedDB's
+// structured clone, mirroring persistence.ts). Drives the real core commands, no mocks.
+//
+// createDemoWorld's deposits are [Wood A, Wood B, Stone A, Stone B]; only the "A" warehouses
+// are seeded (30 each). A wood extractor costs 20 stone and vice versa; extractor rate 1 * the
+// rich tier's multiplier 2 = 2 units/s produced once built.
+describe("wood/stone build bootstrap", () => {
+  it("boots with a seeded stockpile and no extractors", () => {
     const world = createDemoWorld(1, 0);
-    const quarry = world.buildSite.warehouseId;
+    const { woodA, woodB, stoneA } = namedDeposits(world);
 
     advance(world.state, 60);
 
-    expect(isExtractorBuilt(world)).toBe(false);
-    expect(warehouseAmountAt(world.state, quarry, 60)).toBe(0);
+    for (const dep of world.deposits) expect(isExtractorBuilt(world, dep.id)).toBe(false);
+    // Seeded warehouses hold exactly the stockpile (no producer grows it); unseeded hold 0.
+    expect(warehouseAmountAt(world.state, woodA.warehouseId, 60)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(world.state, stoneA.warehouseId, 60)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(world.state, woodB.warehouseId, 60)).toBe(0);
+    expect(snapshotWorld(world).contentVersion).toBe(WORLD_CONTENT_VERSION);
   });
 
-  it("building starts income from the command time", () => {
+  it("debits the cross-resource and starts income from the command time", () => {
     const world = createDemoWorld(1, 0);
-    const quarry = world.buildSite.warehouseId;
+    const { woodA, stoneA } = namedDeposits(world);
 
-    advance(world.state, 20);
-    buildExtractor(world, 20);
+    advance(world.state, 10);
+    expect(buildExtractor(world, woodA.id, 10)).toBe(true);
 
-    expect(isExtractorBuilt(world)).toBe(true);
-    // rate 5 * tier multiplier 2 = 10/s, 10s elapsed since the t=20 build.
-    expect(warehouseAmountAt(world.state, quarry, 30)).toBeCloseTo(100, 9);
+    expect(isExtractorBuilt(world, woodA.id)).toBe(true);
+    // The wood extractor is paid in stone: the island's only stone (stoneA, 30) drops to 10.
+    expect(warehouseAmountAt(world.state, stoneA.warehouseId, 10)).toBeCloseTo(10, 9);
+    // woodA warehouse: 30 seeded + 2/s from the t=10 build -> 50 by t=20.
+    expect(warehouseAmountAt(world.state, woodA.warehouseId, 20)).toBeCloseTo(50, 9);
   });
 
-  it("is idempotent — a second build does not add a second extractor", () => {
+  it("gates a later build until the running extractors have replenished stock", () => {
     const world = createDemoWorld(1, 0);
-    const quarry = world.buildSite.warehouseId;
+    const { woodA, woodB, stoneA } = namedDeposits(world);
 
-    buildExtractor(world, 10);
-    buildExtractor(world, 20);
+    // Both wood deposits cost 20 stone each; only 30 stone is stocked at t=0.
+    expect(buildExtractor(world, woodA.id, 0)).toBe(true); // stone 30 -> 10
+    expect(buildExtractor(world, woodB.id, 0)).toBe(false); // 10 stone left: unaffordable
 
-    // A duplicate producer would double the draw; capacity is 100, so 10/s fills in 10s.
-    expect(warehouseAmountAt(world.state, quarry, 30)).toBeCloseTo(100, 9);
+    // Build a stone extractor (costs 20 wood, from woodA's 30) so stone starts accruing again.
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true); // stoneA now produces 2/s
+    // stone: 10 + 2/s -> 20 by t=5, so the second wood extractor unlocks.
+    advance(world.state, 5);
+    expect(warehouseAmountAt(world.state, stoneA.warehouseId, 5)).toBeCloseTo(20, 9);
+    expect(buildExtractor(world, woodB.id, 5)).toBe(true);
+  });
+
+  it("is idempotent — a second build on the same deposit is refused", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA } = namedDeposits(world);
+
+    expect(buildExtractor(world, woodA.id, 5)).toBe(true);
+    expect(buildExtractor(world, woodA.id, 10)).toBe(false);
   });
 
   it("survives a save/reload round-trip", () => {
     const world = createDemoWorld(1, 0);
-    const quarry = world.buildSite.warehouseId;
+    const { woodA } = namedDeposits(world);
 
-    advance(world.state, 15);
-    buildExtractor(world, 15);
+    advance(world.state, 5);
+    buildExtractor(world, woodA.id, 5);
     world.state.wallTime = 0;
 
     const saved = structuredClone(snapshotWorld(world));
     const restored = restoreWorld(saved, 0); // now == wallTime: no offline gap
 
-    expect(isExtractorBuilt(restored)).toBe(true);
+    expect(isExtractorBuilt(restored, woodA.id)).toBe(true);
     expect(restored.deposits).toEqual(world.deposits);
-    advance(restored.state, 20);
-    expect(warehouseAmountAt(restored.state, quarry, 20)).toBeCloseTo(50, 9);
+    // woodA: 30 seeded + 2/s since t=5 -> 50 by t=15.
+    advance(restored.state, 15);
+    expect(warehouseAmountAt(restored.state, woodA.warehouseId, 15)).toBeCloseTo(50, 9);
   });
 });
 
-// Content upgrades on restore: a pre-refinement save (no Foundry, no converter, no
-// contentVersion field) gains the refinement slice when loaded — exactly once, and
-// without touching a save already at the current version. Real core commands + the app
-// restore path, no mocks.
-describe("content upgrades on restore", () => {
-  // A save shaped like the pre-refinement world (state before commit 82bdbc0): three
-  // warehouses, no converter, and no contentVersion field (optional in SavedWorld, so
-  // the literal types directly). Built through the core commands the old createDemoWorld
-  // used.
-  function preRefinementSave(): SavedWorld {
-    const state = createSimState(1, 0);
-    const ore = resourceType("ore");
-    const stone = resourceType("stone");
-    const home = islandId("home");
-
-    const oreDeposit = addDeposit(state, 0, ore, [{ amount: 500, multiplier: 2 }], 0.5);
-    const pier = addWarehouse(state, 0, ore, home, 100);
-    const depot = addWarehouse(state, 0, ore, home, 200);
-    addExtractor(state, 0, 5, oreDeposit, pier);
-    const granite = addDeposit(state, 0, stone, [{ amount: 500, multiplier: 2 }], 0.5);
-    const quarry = addWarehouse(state, 0, stone, home, 100);
-    setWarehousePullRate(state, 0, pier, 3);
-    addRoute(state, 0, pier, depot, 4);
-    state.wallTime = 0;
-
-    return {
-      doc: serializeState(state),
-      warehouses: [
-        { id: pier, label: "Pier" },
-        { id: depot, label: "Depot" },
-        { id: quarry, label: "Quarry" },
-      ],
-      deposits: [
-        { id: oreDeposit, label: "Ore vein" },
-        { id: granite, label: "Granite vein" },
-      ],
-      buildSite: { depositId: granite, warehouseId: quarry },
-    }; // no contentVersion: a pre-refinement save predates the field
-  }
-
-  it("backfills the Foundry and a producing converter onto a pre-refinement save", () => {
-    const restored = restoreWorld(preRefinementSave(), 0); // now == wallTime: no offline gap
-
-    const foundry = restored.warehouses.find((w) => w.label === "Foundry");
-    expect(foundry).toBeDefined();
-    if (foundry === undefined) throw new Error("Foundry not backfilled");
-
-    // The converter smelts the Depot's ore into ingots: the Foundry, empty at restore,
-    // fills over time. Assert it produces and keeps producing.
-    expect(warehouseAmountAt(restored.state, foundry.id, 0)).toBe(0);
-    advance(restored.state, 30);
-    const at30 = warehouseAmountAt(restored.state, foundry.id, 30);
-    advance(restored.state, 60);
-    const at60 = warehouseAmountAt(restored.state, foundry.id, 60);
-    expect(at30).toBeGreaterThan(0);
-    expect(at60).toBeGreaterThan(at30);
-
-    // Re-snapshotting stamps the current content version + exactly one converter.
-    const snap = snapshotWorld(restored);
-    expect(snap.contentVersion).toBe(WORLD_CONTENT_VERSION);
-    expect(snap.doc.converters).toHaveLength(1);
-  });
-
-  it("is idempotent across a restore -> snapshot -> restore round-trip", () => {
-    const first = snapshotWorld(restoreWorld(preRefinementSave(), 0));
-    const second = snapshotWorld(restoreWorld(structuredClone(first), 0));
-
-    // The second restore is already at the current version, so no step runs again.
-    expect(second.warehouses.filter((w) => w.label === "Foundry")).toHaveLength(1);
-    expect(second.doc.converters).toHaveLength(1);
+// The content-version framework is retained (WORLD_UPGRADES is empty after the pivot) plus the
+// one-time reset that discards pre-pivot ore/ingot saves. Real app restore path, no mocks.
+describe("restore versioning and the one-time reset", () => {
+  it("rejects a legacy ore/ingot envelope so the caller quarantines it", () => {
+    // Pre-pivot saves carried a singular `buildSite`; the wood/stone envelope never does, so
+    // its presence is the discriminator restoreWorld throws on.
+    const legacy = {
+      ...structuredClone(snapshotWorld(createDemoWorld(1, 0))),
+      buildSite: { depositId: "x", warehouseId: "y" },
+    };
+    expect(() => restoreWorld(legacy, 0)).toThrow(/legacy/);
   });
 
   it("leaves a current-version save untouched", () => {
     const saved = structuredClone(snapshotWorld(createDemoWorld(1, 0)));
     const restored = restoreWorld(saved, 0);
 
-    // No upgrade step should run: warehouse/deposit view models are unchanged.
     expect(restored.warehouses).toEqual(saved.warehouses);
     expect(restored.deposits).toEqual(saved.deposits);
-    expect(snapshotWorld(restored).doc.converters).toHaveLength(1);
+    expect(snapshotWorld(restored).contentVersion).toBe(WORLD_CONTENT_VERSION);
   });
 
-  it("does not duplicate the Foundry when a version-stamp-less save already has one", () => {
-    // Saves written by the refinement commit itself carry the Foundry + converter in the
-    // doc but no contentVersion field. The v1 step must detect the content and no-op.
-    const saved = structuredClone(snapshotWorld(createDemoWorld(1, 0)));
-    delete saved.contentVersion;
-
-    const restored = restoreWorld(saved, 0);
-
-    expect(restored.warehouses.filter((w) => w.label === "Foundry")).toHaveLength(1);
-    expect(snapshotWorld(restored).doc.converters).toHaveLength(1);
-  });
-
-  it("rejects a corrupt contentVersion instead of misapplying upgrades", () => {
+  it("rejects a corrupt contentVersion instead of silently resetting", () => {
     for (const bad of [0, -1e15, 1.5, Number.NaN]) {
-      const saved = { ...snapshotWorld(createDemoWorld(1, 0)), contentVersion: bad };
-      expect(() => restoreWorld(structuredClone(saved), 0)).toThrow(/contentVersion/);
+      const saved = {
+        ...structuredClone(snapshotWorld(createDemoWorld(1, 0))),
+        contentVersion: bad,
+      };
+      expect(() => restoreWorld(saved, 0)).toThrow(/contentVersion/);
     }
   });
 
   it("never stamps a save below the version a newer app wrote", () => {
-    // Stale service-worker-pinned bundle loading a future save: no steps run, and the
-    // re-snapshot keeps the higher version so the newer app won't re-run its steps on
-    // content that is already there.
-    const saved = {
-      ...structuredClone(snapshotWorld(createDemoWorld(1, 0))),
-      contentVersion: 99,
-    };
+    // Stale service-worker-pinned bundle loading a future save: the re-snapshot keeps the
+    // higher version so the newer app won't re-run its steps on content already there.
+    const saved = { ...structuredClone(snapshotWorld(createDemoWorld(1, 0))), contentVersion: 99 };
     const restored = restoreWorld(saved, 0);
 
-    expect(restored.warehouses).toEqual(saved.warehouses);
+    expect(restored.deposits).toEqual(saved.deposits);
     expect(snapshotWorld(restored).contentVersion).toBe(99);
-  });
-
-  it("skips a step's wiring instead of quarantining when its command fails", () => {
-    // Hand-edited save: the "Depot"-labeled warehouse stores ingots, so the backfill's
-    // addConverter rejects same-resource endpoints. Restore must survive with the wiring
-    // skipped — a throw here would send a working save into the quarantine path.
-    const state = createSimState(1, 0);
-    const ore = resourceType("ore");
-    const deposit = addDeposit(state, 0, ore, [{ amount: 500, multiplier: 2 }], 0.5);
-    const depot = addWarehouse(state, 0, resourceType("ingot"), islandId("home"), 100);
-    state.wallTime = 0;
-    const saved: SavedWorld = {
-      doc: serializeState(state),
-      warehouses: [{ id: depot, label: "Depot" }],
-      deposits: [{ id: deposit, label: "Ore vein" }],
-      buildSite: { depositId: deposit, warehouseId: depot },
-    };
-
-    const restored = restoreWorld(saved, 0);
-
-    expect(snapshotWorld(restored).doc.converters).toHaveLength(0);
-    expect(snapshotWorld(restored).contentVersion).toBe(WORLD_CONTENT_VERSION);
   });
 });

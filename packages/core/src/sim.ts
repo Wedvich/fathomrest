@@ -598,6 +598,22 @@ export function addWarehouse(
   return id;
 }
 
+// Add `amount` of stock straight into a warehouse at t, capped at its capacity — the way a
+// world seeds a starting stockpile (no producer required) and, later, how one-off rewards
+// land. Same validate -> advance -> mutate -> derive shape as the other commands; reads the
+// holding at t and re-anchors at t so the following deriveAll continues from the granted
+// level. Excess above capacity is dropped, mirroring how a filled warehouse jams.
+export function grantResource(state: SimState, t: number, warehouseId: Id, amount: number): void {
+  if (!Number.isFinite(amount) || !(amount >= 0)) {
+    throw new Error(`grant amount must be finite and >= 0, got ${amount}`);
+  }
+  const warehouse = getWarehouse(state, warehouseId); // validates the target exists
+  advance(state, t);
+  warehouse.anchorAmount = Math.min(warehouse.capacity, clampedAmount(warehouse, t) + amount);
+  warehouse.anchorTime = t;
+  deriveAll(state);
+}
+
 // tiers may be empty: a pure-floor deposit is a plain perpetual producer.
 export function addDeposit(
   state: SimState,
@@ -662,6 +678,30 @@ export function addExtractor(
   return id;
 }
 
+type Payer = { warehouse: Warehouse; available: number };
+
+// Every warehouse on `island` storing `resource`, with each one's clamped amount at t and
+// their sum. Shared by debitCost (which spends it) and canAffordBuild (which only checks the
+// total), so the affordability rule and the debit can never drift apart. Table order
+// (forEachWarehouse) keeps replay bit-identical (docs/browser-performance.md).
+function islandPayers(
+  state: SimState,
+  t: number,
+  island: IslandId,
+  resource: ResourceType,
+): { payers: Payer[]; total: number } {
+  const payers: Payer[] = [];
+  let total = 0;
+  forEachWarehouse(state, (_id, warehouse) => {
+    if (warehouse.islandId === island && warehouse.resource === resource) {
+      const available = clampedAmount(warehouse, t);
+      payers.push({ warehouse, available });
+      total += available;
+    }
+  });
+  return { payers, total };
+}
+
 // Debit a build cost from one island's stock. For each resource in the cost vector, spread
 // the charge across every warehouse on the build site's island that stores it, in
 // proportion to each one's current holding. Affordability is checked for the WHOLE vector
@@ -675,11 +715,7 @@ function debitCost(
   island: IslandId,
   cost: ReadonlyMap<ResourceType, number>,
 ): void {
-  const plans: {
-    payers: { warehouse: Warehouse; available: number }[];
-    amount: number;
-    total: number;
-  }[] = [];
+  const plans: { payers: Payer[]; amount: number; total: number }[] = [];
   for (const [resource, amount] of cost) {
     if (!Number.isFinite(amount) || !(amount >= 0)) {
       throw new Error(`build cost for ${resource} must be finite and >= 0, got ${amount}`);
@@ -687,15 +723,7 @@ function debitCost(
     if (amount === 0) {
       continue;
     }
-    const payers: { warehouse: Warehouse; available: number }[] = [];
-    let total = 0;
-    forEachWarehouse(state, (_id, warehouse) => {
-      if (warehouse.islandId === island && warehouse.resource === resource) {
-        const available = clampedAmount(warehouse, t);
-        payers.push({ warehouse, available });
-        total += available;
-      }
-    });
+    const { payers, total } = islandPayers(state, t, island, resource);
     if (total < amount) {
       throw new Error(
         `insufficient ${resource} on island ${island}: need ${amount}, have ${total}`,
@@ -711,6 +739,31 @@ function debitCost(
       warehouse.anchorTime = t;
     }
   }
+}
+
+// Read-only affordability check mirroring debitCost's whole-vector precondition: true iff
+// every resource in `cost` is fully covered by stock on `island` at t. Advances and mutates
+// nothing — callers (the build UI) advance to t first, same query contract as
+// warehouseAmountAt. Uses the same per-resource island sum as debitCost (islandPayers), so a
+// button that reports "affordable" can never be refused by the subsequent build.
+export function canAffordBuild(
+  state: SimState,
+  t: number,
+  island: IslandId,
+  cost: ReadonlyMap<ResourceType, number>,
+): boolean {
+  for (const [resource, amount] of cost) {
+    if (!Number.isFinite(amount) || !(amount >= 0)) {
+      return false;
+    }
+    if (amount === 0) {
+      continue;
+    }
+    if (islandPayers(state, t, island, resource).total < amount) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Player build command: pay `cost` from the build site's island, then place the extractor,

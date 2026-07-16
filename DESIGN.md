@@ -121,7 +121,11 @@ extract, refine, research, and sail out to discover new islands.
   (saves written by a step's own introducing commit predate the version stamp) and
   failure-tolerant (a failing step logs and degrades to missing content — never a save
   reset); `contentVersion` is validated at the restore boundary, and a re-save never
-  stamps below the version a newer app wrote (stale service-worker bundles).
+  stamps below the version a newer app wrote (stale service-worker bundles). **One-time
+  exception**: the wood/stone pivot (base economy redefined from scratch) is too large to
+  express as an upgrade step, so `restoreWorld` detects the legacy ore/ingot envelope and
+  discards it into the quarantine path once. This is a blessed exception for pre-release
+  placeholder content only; the no-reset rule stands for all future changes.
 - **Islands are procedural from hand-authored parts**: generator assembles shapes,
   biomes, slot layouts, and distance-scaled deposit tables from a template library.
   Story islands hand-placed at milestones.
@@ -132,7 +136,12 @@ extract, refine, research, and sail out to discover new islands.
 Test every pillar at minimum depth; if this isn't fun, content won't fix it.
 
 - 1 starting island + 2–3 discoverable islands
-- ~8 resources, one refinement tier
+- ~8 resources, one refinement tier. **Tier-0 base is wood + stone** — the bootstrap starts
+  with a seeded stockpile and no extractors; deposits are worked by cost-gated builds.
+  Refinement (an ore→ingot-style tier) is deferred, to be layered on the base later.
+- **Building bootstrap** — the early game is building extractors: cross-resource costs
+  (a wood extractor is paid in stone and vice versa) gate later builds behind accumulation.
+  Extends to buildable/costed routes and converters through the same layer (next increment).
 - ~20-node research tree with one exclusive island-specialization junction
 - Expeditions with outfitting + one mid-voyage decision point
 - Warehouses, caps, transport routes
@@ -141,7 +150,8 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
 
 ## Open items
 
-- Name; concrete resource/biome list (vertical slice forces these).
+- Name; concrete resource/biome list (vertical slice forces these). Tier-0 base settled as
+  wood + stone; the rest of the ~8-resource set and the refinement tier are still open.
 - Asset-generation tooling.
 - Tuning constants: depletion curves, cap sizes — playtest territory, under the
   tight-caps pacing principle (core loop, idle half).

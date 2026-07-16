@@ -1,14 +1,17 @@
 import {
   advance,
+  canAffordBuild,
   depositMultiplier,
   depositRemainingAt,
   getDeposit,
   getWarehouse,
   warehouseAmountAt,
   warehouseOutflowRate,
+  type IslandId,
+  type ResourceType,
 } from "@fathomrest/core";
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import {
   ensurePersistentStorage,
@@ -53,14 +56,15 @@ const AUTOSAVE_INTERVAL_MS = 15_000;
 // fresh demo world; it is saved on visibility-hidden, pagehide, and a periodic backstop.
 export function PixiReadout(): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
-  // Set once the world loads; the button is inert until then. Bridges the React click
-  // handler to the sim-clock/world state that live inside the effect closure.
-  const buildRef = useRef<(() => void) | null>(null);
-  const [built, setBuilt] = useState(false);
+  // The build buttons (one per deposit) are created imperatively inside the effect once the
+  // world loads, so the React tree stays static and the frame loop can toggle their disabled
+  // state without a re-render (see the ticker below).
+  const controlsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const host = hostRef.current;
-    if (host === null) return;
+    const controls = controlsRef.current;
+    if (host === null || controls === null) return;
 
     ensurePersistentStorage();
 
@@ -157,16 +161,6 @@ export function PixiReadout(): React.JSX.Element {
         });
       };
 
-      // First player command. Builds at the current sim time, then saves immediately
-      // (save-on-command) so the mutation can't be lost to a dropped pagehide save.
-      buildRef.current = (): void => {
-        // Save only when the build actually happened (save-on-command); a rejected build (can't
-        // afford it yet) leaves state untouched, so there is nothing to persist.
-        if (buildExtractor(world, epochAtStart + clock.now())) {
-          requestSave?.();
-        }
-      };
-
       // Pixi v8 Text renders through the browser font system and won't re-layout when a
       // face loads later, so ensure "Coming Soon" is decoded before the first Text is built;
       // otherwise the first frame draws in the monospace fallback. A load failure is
@@ -194,7 +188,6 @@ export function PixiReadout(): React.JSX.Element {
       }
       host.appendChild(app.canvas);
       live = app;
-      setBuilt(isExtractorBuilt(world));
 
       const barWidth = WIDTH - PADDING * 2;
 
@@ -299,12 +292,54 @@ export function PixiReadout(): React.JSX.Element {
         });
       });
 
+      // One build button per deposit, created imperatively so the React tree stays static and
+      // the frame loop can drive each button's disabled state without a re-render. Each caches
+      // its cost Map and island once (the frame loop must not allocate — perf doc) and rewrites
+      // its own label/disabled only when the underlying state actually changes.
+      type BuildButton = { update: (t: number) => void };
+      const buttons: BuildButton[] = [];
+      controls.textContent = ""; // StrictMode re-run: drop any buttons the prior pass appended
+      for (const dep of world.deposits) {
+        const el = document.createElement("button");
+        el.type = "button";
+        const costMap = new Map<ResourceType, number>(dep.cost);
+        const island: IslandId = getWarehouse(world.state, dep.warehouseId).islandId;
+        const costLabel = dep.cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
+        el.addEventListener("click", () => {
+          // Save-on-command: persist only when the build actually happened; a rejected build
+          // (unaffordable) leaves state untouched, so there is nothing to save.
+          if (buildExtractor(world, dep.id, epochAtStart + clock.now())) requestSave?.();
+        });
+        controls.appendChild(el);
+        let lastBuilt: boolean | null = null;
+        let lastEnabled: boolean | null = null;
+        buttons.push({
+          update: (t): void => {
+            const isBuilt = isExtractorBuilt(world, dep.id);
+            const enabled = !isBuilt && canAffordBuild(world.state, t, island, costMap);
+            if (isBuilt !== lastBuilt) {
+              lastBuilt = isBuilt;
+              el.textContent = isBuilt
+                ? `${dep.label} — extractor built`
+                : `Build extractor · ${dep.label} (${costLabel})`;
+            }
+            if (enabled !== lastEnabled) {
+              lastEnabled = enabled;
+              el.disabled = !enabled;
+            }
+          },
+        });
+      }
+
       const tick = (): void => {
         const t = epochAtStart + clock.now();
         advance(world.state, t);
         // Indexed loop: iterator protocol allocates per step on JSC (perf doc, frame loop).
         for (let i = 0; i < rows.length; i++) {
           rows[i]?.update(t);
+        }
+        for (let i = 0; i < buttons.length; i++) {
+          buttons[i]?.update(t);
         }
       };
       tick();
@@ -316,7 +351,7 @@ export function PixiReadout(): React.JSX.Element {
 
     return () => {
       disposed = true;
-      buildRef.current = null;
+      controls.textContent = ""; // drop the imperatively-created build buttons
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pageshow", onPageShow);
       window.removeEventListener("pagehide", onPageHide);
@@ -328,18 +363,10 @@ export function PixiReadout(): React.JSX.Element {
     };
   }, []);
 
-  const onBuild = (): void => {
-    if (buildRef.current === null) return;
-    buildRef.current();
-    setBuilt(true);
-  };
-
   return (
     <div>
       <div ref={hostRef} />
-      <button type="button" onClick={onBuild} disabled={built}>
-        {built ? "Extractor built — Quarry producing" : "Build extractor on Quarry"}
-      </button>
+      <div ref={controlsRef} />
     </div>
   );
 }
