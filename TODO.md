@@ -6,58 +6,53 @@ pick up next".
 
 ## Done last session
 
-**Transport routes**, now review-hardened — instant rate-capped flows between warehouses,
-on branch `routes` (not yet merged; rebase + `merge --ff-only` when ready). General DAG
-with hubs (fan-in/fan-out), passing the ADR-0001 §2 litmus test.
+**App wiring** — the core now drives a live readout in the browser (TODO step 1).
 
-Adversarial `/code-review` pass fixed 6 findings on top of the build:
+- `packages/app/src/sim/world.ts` — `createDemoWorld()` builds a placeholder scene
+  entirely through the core command surface (deposit → extractor → Pier warehouse
+  with a pull rate → route → Depot). Pure core, no React/Pixi (core stays
+  UI-agnostic). Stand-in until save-loading exists.
+- `packages/app/src/PixiReadout.tsx` — owns the sim clock and drives
+  `advance(t)` + `warehouseAmountAt`/`warehouseOutflowRate` off Pixi's ticker
+  (rAF-based). Sim time derives from `performance.now()`, so a backgrounded tab
+  (rAF paused) catches up in one big `advance()` on return — the analytic core needs
+  no special offline handling here. React tree stays static; all animation lives in
+  the ticker (no per-frame React re-render).
+- `App.tsx` / `main.tsx` — static demo removed; renders `<PixiReadout />`.
+- Verified end-to-end under headless Chromium: bars animate as the sim advances
+  (Pier 2.1→14.1/100, Depot 2.8→18.9/200 over ~4s, route feeding the depot), zero
+  console/page errors.
 
-- Import boundary now mirrors the command-boundary sign/range checks (`capacity > 0`,
-  `anchorAmount ∈ [0, capacity]`, `pullRate/cap/flow/rate ≥ 0`) — a hand-edited save can
-  no longer feed the solver reversed flows or a negative-floor warehouse.
-- One shared iterative Kahn helper (`graph.ts topoSort`) replaces three separate DAG
-  checkers (recursive-DFS import check, quadratic `routeReaches`, solver
-  `topologicalOrder`); no recursion (deep chains can't overflow), O(V+E) cycle check,
-  determinism preserved (node order = table order).
-- Dropped dead-wire `routeInflow`/`routeOutflow` from `Warehouse` (they were intra-derive
-  temporaries); `solveRoutes` now returns them as scratch consumed by `scheduleWarehouse`.
-- Removed all `as Id` casts flagged under `noUncheckedIndexedAccess` (iterate `.entries()`
-  / element-typed `for…of`); extracted a shared `checkCap`.
+Two fixes made along the way:
 
-The build itself (below) is unchanged; solver math untouched.
+- **StrictMode double-free** in `PixiReadout`: `app.renderer` is `undefined` (not
+  `null`) before async `init()` resolves, so the old `renderer !== null` destroy guard
+  tore down a half-initialized app and Pixi's second `destroy()` threw
+  `_cancelResize is not a function`. Now gated on an explicit `live` ref set only
+  after init resolves.
+- **Import extensions**: relative imports now use the real source extension
+  (`.ts`/`.tsx`), never `.js`/extensionless (TS 7 rewrites on emit). Documented in
+  CLAUDE.md (Workspace) and enforced by a new oxlint `import/extensions` rule
+  (`ts`/`tsx` always, `js`/`jsx` never; packages ignored). Enabling `plugins` in
+  `.oxlintrc.json` overwrites oxlint's defaults, so the default set
+  (`react`, `unicorn`, `typescript`, `oxc`) is re-listed alongside `import`.
 
-- New `Route` component `{ srcId, dstId, cap, flow }` + accessor module; `routes` table
-  on `SimState`; `addRoute` / `setRouteCap` commands; `routeFlow` query. Deletion
-  deferred (add-only; `setRouteCap(…, 0)` disables). `removeRoute` is the obvious next
-  gap when the UI needs it — no table has deletion yet.
-- A route couples its source and destination regimes (full dest backs up sources; dry
-  source starves dests), so warehouse net rate now depends on neighbours'. Resolved
-  within each event/command by `solveRoutes`: alternating topological sweeps + a capped
-  proportional **water-filling** split (`allocateCapped`) at each saturated warehouse.
-  Converges in ≤ 2·N sweeps (loud guard-throw as canary); no new event kind — routes ride
-  the existing warehouse fill/empty crossings. Cycles + self-loops rejected at the
-  command **and** import boundaries (the DAG restriction is what keeps the solver bounded
-  and deterministic — ADR-0001 §Implementation notes, route solver).
-- `deriveAll` restructured: (1) re-anchor + cache extractor inflow, (2) `solveRoutes`,
-  (3) schedule crossings, (4) deposits. `extractorEffectiveRate` / `warehouseOutflowRate`
-  now read the solver's water-fill levels (`inflowThrottle` / `outflowThrottle`); both
-  reduce to the old formulas in the no-routes case, so existing tests are unchanged.
-- Serializer: `routes` table with referential-integrity + self-loop + acyclicity + sign
-  checks on import. Warehouse caches `inflowThrottle`/`outflowThrottle` (query hot path).
-- New integration scenarios (backpressure, starvation, fan-in reflow, un-jam cascade,
-  cycle rejection, sign-check rejections) + a coupled-route-network determinism test
-  (bit-identical across 1 vs 10 000 advances). `typecheck | test | lint | format` all
-  green (46 tests).
+`typecheck | lint | format | test` all green (46 tests).
 
 ## Next session
 
 Per DESIGN.md / TODO step order (litmus-test each new mechanic against ADR-0001 §2 first):
 
-1. **App wiring**: rAF loop → `advance(t)` / `query(t)` → a placeholder Pixi readout once
-   the core surface feels stable (it now is: warehouses, deposits, extractors, routes).
-   Replace the static demo in `App.tsx`. The app re-stamps `state.wallTime` at save time
-   (state.ts contract); offline catch-up is `advance(epoch + offlineElapsedSeconds(...))`.
-   The core is UI-agnostic — keep all React/Pixi out of `@fathomrest/core`.
+1. **Persistence loop**: wire `serializeState`/`deserializeState` to storage
+   (IndexedDB — never localStorage, it's synchronous; structured clone serializes the
+   Map tables natively) so the demo world survives reload, re-stamping `state.wallTime` at
+   save time and doing offline catch-up at load
+   (`advance(epoch + offlineElapsedSeconds(now, wallTime))`). The `PixiReadout` clock
+   currently starts fresh from `epoch 0` each mount — load a saved doc instead of
+   `createDemoWorld` when one exists.
+2. **Interaction**: the readout is display-only. First player command surfaced through
+   the UI (e.g. adjust a warehouse pull rate, add a route) — the app calls the same
+   core commands `createDemoWorld` already uses.
 
 Engine follow-ups (do when they start to matter):
 
@@ -65,9 +60,8 @@ Engine follow-ups (do when they start to matter):
   players tear down structures. Add a single table-deletion function per module (perf
   doc: deletion through one function) and a `deriveAll` after.
 - `solveRoutes` rebuilds adjacency + topo order and re-solves the whole graph every
-  event/command (global O(N+R), acyclicity re-checked via Kahn each derive). Fine at
-  design scale; the natural place for targeted downstream invalidation if a profile ever
-  shows it.
-- Stale events still linger in the heap until their time passes (lazy deletion); the
+  event/command (global O(N+R)). Fine at design scale; the natural place for targeted
+  downstream invalidation if a profile ever shows it.
+- Stale events linger in the heap until their time passes (lazy deletion); the
   serializer filters them. Consider periodic compaction only if heap size ever matters
   during very long offline spans.

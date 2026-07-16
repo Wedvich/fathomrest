@@ -1,6 +1,14 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "ignorePatterns": ["**/dist/**", "**/coverage/**"],
+  "plugins": ["react", "unicorn", "typescript", "oxc", "import"],
+  "rules": {
+    "import/extensions": [
+      "error",
+      "ignorePackages",
+      { "js": "never", "jsx": "never", "ts": "always", "tsx": "always" }
+    ]
+  },
   "overrides": [
     {
       "files": ["packages/core/**/*.ts"],

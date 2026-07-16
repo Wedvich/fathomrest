@@ -44,6 +44,13 @@ paced by a research tree. TypeScript, React + PixiJS, headless simulation core.
 Bun workspaces. Runtime is the browser; Bun is build-time only (install, workspace
 orchestration). TypeScript 7, ESM throughout.
 
+Relative imports carry the **real source extension** — `.ts` / `.tsx`, never `.js`
+and never extensionless. TS 7 rewrites them to `.js` on emit
+(`allowImportingTsExtensions` + `rewriteRelativeImportExtensions`,
+`tsconfig.base.json`); `import foo from "./bar.ts"` is correct, `"./bar.js"` is wrong.
+Enforced by oxlint `import/extensions` (`ts`/`tsx` always, `js`/`jsx` never). Bare
+package specifiers (`react`, `pixi.js`) stay extensionless.
+
 - `packages/core` — `@fathomrest/core`, the headless sim. Pure TS, zero UI deps
   (an oxlint `no-restricted-imports` rule blocks react/react-dom/pixi.js here).
   Exports its `src/index.ts` directly; consumers transpile it, no build step.
