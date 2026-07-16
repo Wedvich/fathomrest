@@ -6,38 +6,34 @@ pick up next".
 
 ## Done last session
 
-**App wiring** — the core now drives a live readout in the browser (TODO step 1).
+**Review follow-ups on the app wiring** — the two non-mechanical findings from the
+adversarial `/code-review` of the readout commit:
 
-- `packages/app/src/sim/world.ts` — `createDemoWorld()` builds a placeholder scene
-  entirely through the core command surface (deposit → extractor → Pier warehouse
-  with a pull rate → route → Depot). Pure core, no React/Pixi (core stays
-  UI-agnostic). Stand-in until save-loading exists.
-- `packages/app/src/PixiReadout.tsx` — owns the sim clock and drives
-  `advance(t)` + `warehouseAmountAt`/`warehouseOutflowRate` off Pixi's ticker
-  (rAF-based). Sim time derives from `performance.now()`, so a backgrounded tab
-  (rAF paused) catches up in one big `advance()` on return — the analytic core needs
-  no special offline handling here. React tree stays static; all animation lives in
-  the ticker (no per-frame React re-render).
-- `App.tsx` / `main.tsx` — static demo removed; renders `<PixiReadout />`.
-- Verified end-to-end under headless Chromium: bars animate as the sim advances
-  (Pier 2.1→14.1/100, Depot 2.8→18.9/200 over ~4s, route feeding the depot), zero
-  console/page errors.
+- `packages/app/src/simClock.ts` (new) — app-side sim-second clock. `now()` runs
+  purely off `performance.now()` (hot path: two reads, zero allocation);
+  `reanchor()` folds in wall-clock time the monotonic clock missed
+  (`max(0, wallDelta − perfDelta)`, ≥1s threshold, clamped so a user clock set
+  backward never rewinds sim time). Anchors don't move on a skipped reanchor, so
+  repeated sub-threshold freezes accumulate and eventually fold in. Unit-tested
+  (4 cases, the self-contained-primitive carve-out).
+- `PixiReadout.tsx` — sim time now comes from `simClock`; `visibilitychange` →
+  `visible` and `pageshow` with `persisted === true` call `reanchor()` (per
+  docs/browser-performance.md §lifecycle / ADR-0001 §4), so Safari
+  suspension/bfcache restores catch up in one `advance()`. Bar fill regained its
+  rounded corners via a static rounded-rect mask on the white-texture Sprite —
+  per-frame work stays a single `width` assignment, no Graphics in the frame path.
+  Tick loop is indexed (perf doc, JSC iterator allocation); row objects carry only
+  what the tick reads.
+- Verified live under headless Chromium with a skewed `Date.now()` standing in for
+  suspension: +30s via `visibilitychange` and +20s via persisted `pageshow` both
+  caught up in one step (Pier saturated at 100/100, Depot 141→200/200);
+  sub-threshold (+0.5s) skew correctly ignored; wall clock set back 1h → no rewind;
+  zero console/page errors.
 
-Two fixes made along the way:
+Known cosmetic nit: the readout template hardcodes the minus sign, so a zero rate
+renders as `(−0.0/s)` (Depot). One-character fix if it grates.
 
-- **StrictMode double-free** in `PixiReadout`: `app.renderer` is `undefined` (not
-  `null`) before async `init()` resolves, so the old `renderer !== null` destroy guard
-  tore down a half-initialized app and Pixi's second `destroy()` threw
-  `_cancelResize is not a function`. Now gated on an explicit `live` ref set only
-  after init resolves.
-- **Import extensions**: relative imports now use the real source extension
-  (`.ts`/`.tsx`), never `.js`/extensionless (TS 7 rewrites on emit). Documented in
-  CLAUDE.md (Workspace) and enforced by a new oxlint `import/extensions` rule
-  (`ts`/`tsx` always, `js`/`jsx` never; packages ignored). Enabling `plugins` in
-  `.oxlintrc.json` overwrites oxlint's defaults, so the default set
-  (`react`, `unicorn`, `typescript`, `oxc`) is re-listed alongside `import`.
-
-`typecheck | lint | format | test` all green (46 tests).
+`typecheck | lint | format | test` all green (50 tests).
 
 ## Next session
 
@@ -49,7 +45,8 @@ Per DESIGN.md / TODO step order (litmus-test each new mechanic against ADR-0001 
    save time and doing offline catch-up at load
    (`advance(epoch + offlineElapsedSeconds(now, wallTime))`). The `PixiReadout` clock
    currently starts fresh from `epoch 0` each mount — load a saved doc instead of
-   `createDemoWorld` when one exists.
+   `createDemoWorld` when one exists. `simClock`'s wall/monotonic anchor pair is the
+   piece to hook save-time `wallTime` re-stamping into — don't fork the anchor math.
 2. **Interaction**: the readout is display-only. First player command surfaced through
    the UI (e.g. adjust a warehouse pull rate, add a route) — the app calls the same
    core commands `createDemoWorld` already uses.
