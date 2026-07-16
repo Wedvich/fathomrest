@@ -14,8 +14,10 @@ import { loadSavedWorld, writeSavedWorld } from "./persistence.ts";
 import {
   buildExtractor,
   createDemoWorld,
+  type DemoWorld,
   isExtractorBuilt,
   restoreWorld,
+  type SavedWorld,
   snapshotWorld,
 } from "./sim/world.ts";
 import { createSimClock } from "./simClock.ts";
@@ -28,7 +30,9 @@ const PADDING = 24;
 // Autosave cadence. Elapsed time is reconstructed from the saved (epoch, wallTime) anchor
 // on load, so this need not be tight for time-tracking — it bounds how much player state
 // (once commands mutate the world) a crash could lose. Lifecycle events (hidden/pagehide)
-// are the primary save points; this is the backstop.
+// save too, but WebKit does not reliably run a save that has to open the DB from
+// scratch during teardown (persistence.ts holds one long-lived connection so those saves
+// at least avoid that hop); this interval is the backstop that always gets a full run.
 const AUTOSAVE_INTERVAL_MS = 15_000;
 
 // Placeholder Pixi readout: owns the sim clock and drives advance(t)/query(t) off Pixi's
@@ -81,30 +85,58 @@ export function PixiReadout(): React.JSX.Element {
     const autosave = window.setInterval(() => requestSave?.(), AUTOSAVE_INTERVAL_MS);
 
     void (async () => {
-      const saved = await loadSavedWorld().catch(() => null);
+      // A failed read (e.g. Safari's transient "connection lost" right after
+      // navigation — persistence.ts retries once before giving up) is NOT the same as
+      // "no save exists". Treating it as such and then autosaving the resulting fresh
+      // world clobbers the real save a few seconds later — this was the "save resets
+      // every 2-10 refreshes" bug. On a genuine read failure this session runs
+      // in-memory with persistence disabled instead, leaving the existing save alone
+      // for the next reload to retry.
+      let saved: SavedWorld | null = null;
+      let persistenceDisabled = false;
+      try {
+        saved = await loadSavedWorld();
+      } catch (error) {
+        persistenceDisabled = true;
+        console.error("Failed to load saved world; continuing without persistence.", error);
+      }
       if (disposed) return;
-      // Schema guard: fall back to a fresh world if the save predates the current envelope
-      // (deposits/buildSite view models). Saves are unversioned pre-release (ADR-0001 §8), so
-      // an old save is discarded rather than migrated.
-      const world =
-        saved && "deposits" in saved
-          ? restoreWorld(saved, Date.now())
-          : createDemoWorld(1, Date.now());
+      // Schema guard: fall back to a fresh world only if the save is absent, predates the
+      // envelope's view models (deposits/buildSite), or is unmigratable. Core deserialize
+      // forward-migrates older documents (e.g. v1 saves gain the islandId field), so a routine
+      // schema bump preserves idle progress rather than resetting it.
+      let world: DemoWorld;
+      try {
+        world =
+          saved && "deposits" in saved
+            ? restoreWorld(saved, Date.now())
+            : createDemoWorld(1, Date.now());
+      } catch (error) {
+        // Corrupt or unmigratable save: safe to discard and start fresh (ADR-0001 §8).
+        console.error("Saved world failed to restore; starting a fresh world.", error);
+        world = createDemoWorld(1, Date.now());
+      }
       // Canonical current sim time is epochAtStart + clock.now(): clock.now() grows from 0
       // at mount, epochAtStart carries any epoch a loaded save already advanced to.
       const epochAtStart = world.state.epoch;
 
       requestSave = (): void => {
+        if (persistenceDisabled) return;
         advance(world.state, epochAtStart + clock.now());
         world.state.wallTime = Date.now();
-        void writeSavedWorld(snapshotWorld(world)).catch(() => {});
+        void writeSavedWorld(snapshotWorld(world)).catch((error: unknown) => {
+          console.error("Failed to save world.", error);
+        });
       };
 
       // First player command. Builds at the current sim time, then saves immediately
       // (save-on-command) so the mutation can't be lost to a dropped pagehide save.
       buildRef.current = (): void => {
-        buildExtractor(world, epochAtStart + clock.now());
-        requestSave?.();
+        // Save only when the build actually happened (save-on-command); a rejected build (can't
+        // afford it yet) leaves state untouched, so there is nothing to persist.
+        if (buildExtractor(world, epochAtStart + clock.now())) {
+          requestSave?.();
+        }
       };
 
       await app.init({
