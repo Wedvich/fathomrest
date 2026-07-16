@@ -1,9 +1,23 @@
-import { advance, warehouseAmountAt, warehouseOutflowRate, getWarehouse } from "@fathomrest/core";
+import {
+  advance,
+  depositMultiplier,
+  depositRemainingAt,
+  getDeposit,
+  getWarehouse,
+  warehouseAmountAt,
+  warehouseOutflowRate,
+} from "@fathomrest/core";
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { loadSavedWorld, writeSavedWorld } from "./persistence.ts";
-import { createDemoWorld, restoreWorld, snapshotWorld } from "./sim/world.ts";
+import {
+  buildExtractor,
+  createDemoWorld,
+  isExtractorBuilt,
+  restoreWorld,
+  snapshotWorld,
+} from "./sim/world.ts";
 import { createSimClock } from "./simClock.ts";
 
 const WIDTH = 480;
@@ -28,6 +42,10 @@ const AUTOSAVE_INTERVAL_MS = 15_000;
 // fresh demo world; it is saved on visibility-hidden, pagehide, and a periodic backstop.
 export function PixiReadout(): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Set once the world loads; the button is inert until then. Bridges the React click
+  // handler to the sim-clock/world state that live inside the effect closure.
+  const buildRef = useRef<(() => void) | null>(null);
+  const [built, setBuilt] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -65,7 +83,13 @@ export function PixiReadout(): React.JSX.Element {
     void (async () => {
       const saved = await loadSavedWorld().catch(() => null);
       if (disposed) return;
-      const world = saved ? restoreWorld(saved, Date.now()) : createDemoWorld(1, Date.now());
+      // Schema guard: fall back to a fresh world if the save predates the current envelope
+      // (deposits/buildSite view models). Saves are unversioned pre-release (ADR-0001 §8), so
+      // an old save is discarded rather than migrated.
+      const world =
+        saved && "deposits" in saved
+          ? restoreWorld(saved, Date.now())
+          : createDemoWorld(1, Date.now());
       // Canonical current sim time is epochAtStart + clock.now(): clock.now() grows from 0
       // at mount, epochAtStart carries any epoch a loaded save already advanced to.
       const epochAtStart = world.state.epoch;
@@ -76,9 +100,16 @@ export function PixiReadout(): React.JSX.Element {
         void writeSavedWorld(snapshotWorld(world)).catch(() => {});
       };
 
+      // First player command. Builds at the current sim time, then saves immediately
+      // (save-on-command) so the mutation can't be lost to a dropped pagehide save.
+      buildRef.current = (): void => {
+        buildExtractor(world, epochAtStart + clock.now());
+        requestSave?.();
+      };
+
       await app.init({
         width: WIDTH,
-        height: PADDING * 2 + ROW_HEIGHT * world.warehouses.length,
+        height: PADDING * 2 + ROW_HEIGHT * (world.warehouses.length + world.deposits.length),
         background: 0x0e1a24,
         antialias: true,
         resolution: window.devicePixelRatio,
@@ -92,15 +123,25 @@ export function PixiReadout(): React.JSX.Element {
       }
       host.appendChild(app.canvas);
       live = app;
+      setBuilt(isExtractorBuilt(world));
 
       const barWidth = WIDTH - PADDING * 2;
-      const rows = world.warehouses.map((wh, i) => {
-        const y = PADDING + i * ROW_HEIGHT;
-        const row = new Container();
-        row.y = y;
 
-        const label = new Text({
-          text: wh.label,
+      // One bar per node. A warehouse bar fills toward capacity (blue); a deposit bar drains
+      // its reserve toward the floor (amber). Each row owns an update(t) closure that memoizes
+      // its last frac/text, so the frame loop only touches Pixi when a value actually moved.
+      type Row = { update: (t: number) => void };
+      const rows: Row[] = [];
+
+      const makeBar = (
+        label: string,
+        index: number,
+        tint: number,
+      ): { fill: Sprite; readout: Text } => {
+        const row = new Container();
+        row.y = PADDING + index * ROW_HEIGHT;
+        const labelText = new Text({
+          text: label,
           style: { fill: 0xcfe6f2, fontSize: 15, fontFamily: "monospace" },
         });
         const readout = new Text({
@@ -110,31 +151,78 @@ export function PixiReadout(): React.JSX.Element {
         readout.x = 90;
         const track = new Graphics().roundRect(0, 0, barWidth, BAR_HEIGHT, 4).fill(0x14303f);
         track.y = 24;
-        // Plain rect Sprite, not Graphics: width is set every tick to reflect frac, and
-        // a Sprite resize is a cheap transform (no geometry rebuild/GPU re-upload) vs.
-        // Graphics' clear()+redraw. A static rounded-rect mask restores the track's
-        // corner rounding without putting Graphics back in the frame path.
+        // Plain rect Sprite, not Graphics: width is set every tick to reflect frac, and a
+        // Sprite resize is a cheap transform (no geometry rebuild/GPU re-upload) vs. Graphics'
+        // clear()+redraw. A static rounded-rect mask restores the track's corner rounding
+        // without putting Graphics back in the frame path.
         const fill = new Sprite(Texture.WHITE);
-        fill.tint = 0x3fa7d6;
+        fill.tint = tint;
         fill.y = 24;
         fill.height = BAR_HEIGHT;
         const corners = new Graphics().roundRect(0, 0, barWidth, BAR_HEIGHT, 4).fill(0xffffff);
         corners.y = 24;
         fill.mask = corners;
-
-        row.addChild(track, fill, corners, label, readout);
+        row.addChild(track, fill, corners, labelText, readout);
         app.stage.addChild(row);
+        return { fill, readout };
+      };
 
+      const setFrac = (fill: Sprite, frac: number): void => {
+        fill.width = Math.max(1, barWidth * frac);
+      };
+
+      world.warehouses.forEach((wh, i) => {
+        const { fill, readout } = makeBar(wh.label, i, 0x3fa7d6);
         const capacity = getWarehouse(world.state, wh.id).capacity;
-        return {
-          id: wh.id,
-          capacity,
-          fill,
-          readout,
-          lastAmount: NaN,
-          lastOut: NaN,
-          lastFrac: NaN,
-        };
+        let lastFrac = NaN;
+        let lastAmount = NaN;
+        let lastOut = NaN;
+        rows.push({
+          update: (t): void => {
+            const amount = warehouseAmountAt(world.state, wh.id, t);
+            const frac = capacity > 0 ? amount / capacity : 0;
+            if (frac !== lastFrac) {
+              lastFrac = frac;
+              setFrac(fill, frac);
+            }
+            const out = warehouseOutflowRate(world.state, wh.id);
+            const roundedAmount = Math.round(amount * 10) / 10;
+            const roundedOut = Math.round(out * 10) / 10;
+            if (roundedAmount !== lastAmount || roundedOut !== lastOut) {
+              lastAmount = roundedAmount;
+              lastOut = roundedOut;
+              readout.text = `${roundedAmount.toFixed(1)} / ${capacity}  (−${roundedOut.toFixed(1)}/s)`;
+            }
+          },
+        });
+      });
+
+      world.deposits.forEach((dep, i) => {
+        const { fill, readout } = makeBar(dep.label, world.warehouses.length + i, 0xd6a13f);
+        // Reserve above the floor = sum of tier amounts; tier amounts never mutate, so this is
+        // a stable bar denominator captured once.
+        let reserve = 0;
+        for (const tier of getDeposit(world.state, dep.id).tiers) reserve += tier.amount;
+        let lastFrac = NaN;
+        let lastRemaining = NaN;
+        let lastMult = NaN;
+        rows.push({
+          update: (t): void => {
+            const remaining = depositRemainingAt(world.state, dep.id, t);
+            const frac = reserve > 0 ? remaining / reserve : 0;
+            if (frac !== lastFrac) {
+              lastFrac = frac;
+              setFrac(fill, frac);
+            }
+            const mult = depositMultiplier(world.state, dep.id);
+            const roundedRemaining = Math.round(remaining * 10) / 10;
+            if (roundedRemaining !== lastRemaining || mult !== lastMult) {
+              lastRemaining = roundedRemaining;
+              lastMult = mult;
+              readout.text = `${roundedRemaining.toFixed(1)} / ${reserve}  (×${mult})`;
+            }
+          },
+        });
       });
 
       const tick = (): void => {
@@ -142,22 +230,7 @@ export function PixiReadout(): React.JSX.Element {
         advance(world.state, t);
         // Indexed loop: iterator protocol allocates per step on JSC (perf doc, frame loop).
         for (let i = 0; i < rows.length; i++) {
-          const row = rows[i];
-          if (row === undefined) continue;
-          const amount = warehouseAmountAt(world.state, row.id, t);
-          const frac = row.capacity > 0 ? amount / row.capacity : 0;
-          if (frac !== row.lastFrac) {
-            row.lastFrac = frac;
-            row.fill.width = Math.max(1, barWidth * frac);
-          }
-          const out = warehouseOutflowRate(world.state, row.id);
-          const roundedAmount = Math.round(amount * 10) / 10;
-          const roundedOut = Math.round(out * 10) / 10;
-          if (roundedAmount !== row.lastAmount || roundedOut !== row.lastOut) {
-            row.lastAmount = roundedAmount;
-            row.lastOut = roundedOut;
-            row.readout.text = `${roundedAmount.toFixed(1)} / ${row.capacity}  (−${roundedOut.toFixed(1)}/s)`;
-          }
+          rows[i]?.update(t);
         }
       };
       tick();
@@ -169,6 +242,7 @@ export function PixiReadout(): React.JSX.Element {
 
     return () => {
       disposed = true;
+      buildRef.current = null;
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pageshow", onPageShow);
       window.removeEventListener("pagehide", onPageHide);
@@ -180,5 +254,18 @@ export function PixiReadout(): React.JSX.Element {
     };
   }, []);
 
-  return <div ref={hostRef} />;
+  const onBuild = (): void => {
+    if (buildRef.current === null) return;
+    buildRef.current();
+    setBuilt(true);
+  };
+
+  return (
+    <div>
+      <div ref={hostRef} />
+      <button type="button" onClick={onBuild} disabled={built}>
+        {built ? "Extractor built — Quarry producing" : "Build extractor on Quarry"}
+      </button>
+    </div>
+  );
 }
