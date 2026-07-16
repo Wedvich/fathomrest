@@ -6,45 +6,37 @@ pick up next".
 
 ## Done last session
 
-**Resource typing — the upstream unblocker.** Warehouses and deposits are no longer
-untyped "stuff"; each carries a single resource type. Refinement and resource-costed
-building now have their prerequisite.
+**Firefox save-reset hardening.** Investigated the resets ae4ab0f didn't fix
+(user-confirmed gone afterward). Findings from driving Firefox via Playwright against
+the dev server:
 
-- New `packages/core/src/resource.ts`: `ResourceType` — a branded string (like `Id`),
-  opaque to the core. The core stores and compares tags for equality but knows no fixed
-  resource set; resources are authored content in the app layer (DESIGN.md: procedural
-  islands). `resourceType(value)` is the mint/rehydrate site. Exported from `index.ts`.
-- `Deposit` and `Warehouse` each gain a `resource: ResourceType` field; their factories
-  (`createDeposit`, `createWarehouse`) take it first. Commands `addDeposit` and
-  `addWarehouse` take `resource` after `t`.
-- **Type-match enforced at the boundaries:**
-  - `addExtractor` — the deposit's resource must equal the target warehouse's; throws
-    `resource mismatch` otherwise.
-  - `addRoute` — source and destination resources must match (a route moves one type;
-    type conversion is refinement's job).
-  - `serialize.ts` mirrors both invariants at the import boundary for hand-edited saves,
-    plus a non-empty-string check on every `resource` tag. `checkTable` now passes the
-    entry id to its component checker so cross-table resource lookups work.
-- **The flow solver is untouched.** No route crosses types, so each connected component
-  of the route DAG is monochromatic — the solver stays per-type by construction. Every
-  quantity remains a scalar closed form (analytic litmus holds, ADR-0001 §2).
-- App demo world (`packages/app/src/sim/world.ts`): the ore chain (Pier → Depot route)
-  is `ore`; the Quarry build site is `stone`. Exercises typing end-to-end. `SavedWorld`
-  envelope is unchanged (resource rides inside the core `SaveDocument`).
-- Tests: new `resource typing` scenarios in `sim.test.ts` (extractor + route mismatch
-  rejected) and import-boundary cases in `serialize.test.ts` (empty tag, extractor
-  deposit/warehouse mismatch, route type mismatch). All existing scenarios updated for
-  the new `resource` arg.
+- Firefox aborts **every** IndexedDB write issued from `pagehide` — even a synchronous
+  transaction+put on the already-open connection. Teardown saves are a WebKit-only best
+  effort; in Firefox only the interval autosave and save-on-command persist. (The wall
+  gap is recovered by offline catch-up, so at most ~15s of *commands* is at risk.)
+- The storage layer itself was robust in a clean Firefox profile (~90 reload cycles,
+  rapid sub-second reloads, full browser quit/relaunch — no reset, even with the
+  pre-fix build), so the defenses now live at the write sink:
+- `persistence.ts`: **epoch write-guard** — `writeSavedWorld` refuses (warns + skips) a
+  document whose epoch is lower than the stored save's, so no stale writer (second tab,
+  SW-pinned old bundle, fresh world racing a real save) can clobber progress.
+  `quarantineCorruptSave` moves an unrestorable save to a `corrupt-backup` key instead
+  of destroying it. A localStorage **breadcrumb** (epoch + wallTime, written on each
+  successful save) lets boot distinguish "never saved" from "save existed and was lost".
+  `ensurePersistentStorage()` requests persistent storage to opt out of quota eviction.
+- `PixiReadout.tsx`: restore-failure path quarantines the save and logs loudly; an
+  absent save with a breadcrumb present is reported as external storage loss.
 
-`typecheck | lint | format | test` all green (59 tests). Production build clean.
+All four paths verified end-to-end in Playwright Firefox (normal grow, guard skip,
+quarantine + resume, breadcrumb report). `typecheck | lint | format | test` green
+(66 tests).
 
-Note: resource type is not yet surfaced in the readout UI — the Pixi rows still label by
-warehouse/deposit name only. Optional polish; add it when refinement makes types
-player-relevant.
+Note: `packages/app/dist/` predates ae4ab0f — rebuild before serving it anywhere; the
+PWA service worker pins old bundles until the update prompt is accepted.
 
 ## Next session
 
-Both pillars below are now unblocked by resource typing (litmus-test each against
+Both pillars below are unblocked by resource typing (litmus-test each against
 ADR-0001 §2 first):
 
 1. **Refinement** — a converter component: consumes type A from one warehouse at a rate,
@@ -68,8 +60,3 @@ Engine follow-ups (do when they start to matter):
 - Stale events linger in the heap until their time passes (lazy deletion); the serializer
   filters them. Consider periodic compaction only if heap size ever matters during very
   long offline spans.
-
-Heads-up: the working tree has unrelated **PWA integration** changes in flight
-(`vite-plugin-pwa`, `workbox-window`, `UpdatePrompt.tsx`, `vite-env.d.ts`, app
-`package.json`/`vite.config.ts`, `bun.lock`) that predate this session and are not part of
-resource typing — keep them out of the resource-typing commit.

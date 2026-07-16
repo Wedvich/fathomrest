@@ -10,7 +10,13 @@ import {
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { useEffect, useRef, useState } from "react";
 
-import { loadSavedWorld, writeSavedWorld } from "./persistence.ts";
+import {
+  ensurePersistentStorage,
+  loadSavedWorld,
+  quarantineCorruptSave,
+  readSaveBreadcrumb,
+  writeSavedWorld,
+} from "./persistence.ts";
 import {
   buildExtractor,
   createDemoWorld,
@@ -30,9 +36,10 @@ const PADDING = 24;
 // Autosave cadence. Elapsed time is reconstructed from the saved (epoch, wallTime) anchor
 // on load, so this need not be tight for time-tracking — it bounds how much player state
 // (once commands mutate the world) a crash could lose. Lifecycle events (hidden/pagehide)
-// save too, but WebKit does not reliably run a save that has to open the DB from
-// scratch during teardown (persistence.ts holds one long-lived connection so those saves
-// at least avoid that hop); this interval is the backstop that always gets a full run.
+// save too, but teardown-time saves are unreliable: WebKit drops ones needing an async
+// open hop (persistence.ts holds one long-lived connection to dodge that), and Firefox
+// aborts even a synchronous pagehide put. This interval and save-on-command are the
+// writes that always land.
 const AUTOSAVE_INTERVAL_MS = 15_000;
 
 // Placeholder Pixi readout: owns the sim clock and drives advance(t)/query(t) off Pixi's
@@ -54,6 +61,8 @@ export function PixiReadout(): React.JSX.Element {
   useEffect(() => {
     const host = hostRef.current;
     if (host === null) return;
+
+    ensurePersistentStorage();
 
     let disposed = false;
     const app = new Application();
@@ -101,21 +110,40 @@ export function PixiReadout(): React.JSX.Element {
         console.error("Failed to load saved world; continuing without persistence.", error);
       }
       if (disposed) return;
+      // An absent save when the breadcrumb says one existed means the database was lost
+      // outside the app (eviction, corruption, a privacy setting clearing site data) —
+      // log it so a reset in the wild is attributable.
+      if (saved === null && !persistenceDisabled) {
+        const crumb = readSaveBreadcrumb();
+        if (crumb !== null) {
+          console.error(
+            `No save found, but one existed (epoch ${crumb.epoch}, saved ${new Date(crumb.wallTime).toISOString()}) — storage was cleared outside the app.`,
+          );
+        }
+      }
       // Schema guard: fall back to a fresh world only if the save is absent, predates the
       // envelope's view models (deposits/buildSite), or is unmigratable. Core deserialize
       // forward-migrates older documents (e.g. v1 saves gain the islandId field), so a routine
       // schema bump preserves idle progress rather than resetting it.
-      let world: DemoWorld;
-      try {
-        world =
-          saved && "deposits" in saved
-            ? restoreWorld(saved, Date.now())
-            : createDemoWorld(1, Date.now());
-      } catch (error) {
-        // Corrupt or unmigratable save: safe to discard and start fresh (ADR-0001 §8).
-        console.error("Saved world failed to restore; starting a fresh world.", error);
-        world = createDemoWorld(1, Date.now());
+      let world: DemoWorld | null = null;
+      if (saved !== null) {
+        try {
+          if (!("deposits" in saved))
+            throw new Error("save predates the deposits/buildSite envelope");
+          world = restoreWorld(saved, Date.now());
+        } catch (error) {
+          // Unrestorable save: quarantined (not destroyed) for post-mortem, and the main
+          // slot cleared so the epoch guard accepts the fresh world's saves (ADR-0001 §8).
+          console.error(
+            "Saved world failed to restore; quarantining it and starting fresh.",
+            error,
+          );
+          void quarantineCorruptSave(saved).catch((qError: unknown) => {
+            console.error("Failed to quarantine the corrupt save.", qError);
+          });
+        }
       }
+      world ??= createDemoWorld(1, Date.now());
       // Canonical current sim time is epochAtStart + clock.now(): clock.now() grows from 0
       // at mount, epochAtStart carries any epoch a loaded save already advanced to.
       const epochAtStart = world.state.epoch;

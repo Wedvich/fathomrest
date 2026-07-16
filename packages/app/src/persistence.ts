@@ -10,6 +10,11 @@
 // Reusing an already-open connection turns the pagehide save into a single
 // transaction+put with no async open hop, which stands a real chance of completing
 // before the page is gone.
+//
+// Firefox is harsher still: it aborts every IndexedDB write issued from pagehide —
+// even a synchronous transaction+put on this already-open connection (verified
+// empirically, Jul 2026). There, only the interval autosave and save-on-command
+// persist; teardown saves are a WebKit-only best effort.
 
 import type { SavedWorld } from "./sim/world.ts";
 
@@ -64,12 +69,96 @@ export async function loadSavedWorld(): Promise<SavedWorld | null> {
   });
 }
 
+// Guarded write: a document whose epoch is lower than the stored save's is refused.
+// Epoch only grows in a live world, so a regression means a stale writer — a second
+// tab, an old service-worker-pinned bundle, a fresh world racing a real save — and
+// skipping beats clobbering real progress.
 export async function writeSavedWorld(saved: SavedWorld): Promise<void> {
   const db = await getDb();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(saved, KEY);
+    const store = tx.objectStore(STORE);
+    let written = false;
+    const existing = store.get(KEY);
+    existing.onsuccess = (): void => {
+      const current = existing.result as SavedWorld | undefined;
+      if (current !== undefined && current.doc.epoch > saved.doc.epoch) {
+        console.warn(
+          `Skipped save: epoch would regress ${current.doc.epoch} -> ${saved.doc.epoch} (stale writer?).`,
+        );
+        return;
+      }
+      store.put(saved, KEY);
+      written = true;
+    };
+    tx.oncomplete = (): void => {
+      if (written) writeBreadcrumb(saved);
+      resolve();
+    };
+    tx.onerror = (): void => reject(tx.error ?? new Error("indexedDB write failed"));
+  });
+}
+
+// Preserve an unrestorable save for post-mortem (inspectable in devtools under the
+// side key) and clear the main slot so the fresh world's saves aren't refused by the
+// epoch guard above.
+export async function quarantineCorruptSave(saved: SavedWorld): Promise<void> {
+  const db = await getDb();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    store.put(saved, "corrupt-backup");
+    store.delete(KEY);
     tx.oncomplete = (): void => resolve();
     tx.onerror = (): void => reject(tx.error ?? new Error("indexedDB write failed"));
   });
+}
+
+// Tiny marker written alongside every successful save. localStorage, deliberately —
+// the header's "never localStorage" rule is about the world payload; this is ~60
+// bytes at save time. It survives independently of the IndexedDB record, so a boot
+// that finds no save can tell "never saved" apart from "save existed and was lost"
+// (eviction, corruption, a privacy setting wiping site data).
+const BREADCRUMB_KEY = "fathomrest:last-save";
+
+export interface SaveBreadcrumb {
+  readonly epoch: number;
+  readonly wallTime: number;
+}
+
+export function readSaveBreadcrumb(): SaveBreadcrumb | null {
+  try {
+    const raw = localStorage.getItem(BREADCRUMB_KEY);
+    return raw === null ? null : (JSON.parse(raw) as SaveBreadcrumb);
+  } catch {
+    return null; // diagnostics only — unavailable storage must never break the app
+  }
+}
+
+function writeBreadcrumb(saved: SavedWorld): void {
+  try {
+    localStorage.setItem(
+      BREADCRUMB_KEY,
+      JSON.stringify({ epoch: saved.doc.epoch, wallTime: saved.doc.wallTime }),
+    );
+  } catch {
+    // diagnostics only
+  }
+}
+
+// Opt the origin out of best-effort storage: without this the browser may evict the
+// whole database under quota pressure — a wiped save indistinguishable from "no save
+// exists". Firefox may prompt the user once; a denial is logged, not fatal.
+export function ensurePersistentStorage(): void {
+  if (!("storage" in navigator) || typeof navigator.storage.persist !== "function") return;
+  void navigator.storage.persist().then(
+    (granted) => {
+      if (!granted) {
+        console.warn(
+          "Persistent storage denied; the browser may evict the save under quota pressure.",
+        );
+      }
+    },
+    () => {},
+  );
 }
