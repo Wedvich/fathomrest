@@ -6,79 +6,70 @@ pick up next".
 
 ## Done last session
 
-**First player command — build extractor → income appears.** The readout is no longer
-display-only; the loop UI → core command → persist → re-derive on reload is closed.
+**Resource typing — the upstream unblocker.** Warehouses and deposits are no longer
+untyped "stuff"; each carries a single resource type. Refinement and resource-costed
+building now have their prerequisite.
 
-- `packages/app/src/sim/world.ts`:
-  - `createDemoWorld` now seeds an **unworked** vein (`graniteDeposit`) + an idle
-    `Quarry` warehouse with **no extractor** — the build target. Quarry sits at zero
-    until built.
-  - New `BuildSite` (`{ depositId, warehouseId }`) carried on `DemoWorld` and persisted
-    in the `SavedWorld` envelope. It's app-level metadata: the target warehouse has no
-    producer until built, so it can't be re-derived from core state.
-  - `buildExtractor(world, t)` — the command: `addExtractor` at sim time `t` (the core
-    command advances to `t` first, so income begins exactly at `t`). Idempotent via
-    `isExtractorBuilt` (scans extractors for one on the build deposit). Thin add — no
-    cost/slots/adjacency; that's the separate "Building" pillar, still gated on resource
-    typing.
-  - New `deposits` view model (id + label), carried on `DemoWorld` and persisted in
-    `SavedWorld` alongside warehouse labels — the readout now surfaces deposit levels.
-- `PixiReadout.tsx`:
-  - "Build extractor on Quarry" button. Click calls into `buildRef` (bridges React →
-    the effect closure holding the sim clock/world), then **saves immediately**
-    (save-on-command). Button disabled once built; disabled state seeded from
-    `isExtractorBuilt` on load so it survives reload.
-  - **Deposit levels in the readout.** Row rendering refactored into a shared `makeBar`
-    + per-row `update(t)` closure (memoizes last frac/text; frame loop untouched unless a
-    value moved). Warehouse bars fill toward capacity (blue); deposit bars drain their
-    reserve (sum of tier amounts) toward the floor (amber), showing remaining + current
-    `×multiplier`. Makes the rich-phase→floor decay visible.
-  - Load path guards stale saves: `"deposits" in saved` (newest envelope field) — a save
-    predating the current schema falls back to a fresh world (saves are unversioned
-    pre-release, ADR-0001 §8).
-- `packages/app/src/sim/world.test.ts` (new) — scenario coverage through the public
-  world API: Quarry idle pre-build; building starts income from the command time;
-  idempotent double-build; and survives a `snapshotWorld`→`structuredClone`→`restoreWorld`
-  round-trip (deposits view model included; structuredClone stands in for IndexedDB, as
-  in `persistence.ts`).
+- New `packages/core/src/resource.ts`: `ResourceType` — a branded string (like `Id`),
+  opaque to the core. The core stores and compares tags for equality but knows no fixed
+  resource set; resources are authored content in the app layer (DESIGN.md: procedural
+  islands). `resourceType(value)` is the mint/rehydrate site. Exported from `index.ts`.
+- `Deposit` and `Warehouse` each gain a `resource: ResourceType` field; their factories
+  (`createDeposit`, `createWarehouse`) take it first. Commands `addDeposit` and
+  `addWarehouse` take `resource` after `t`.
+- **Type-match enforced at the boundaries:**
+  - `addExtractor` — the deposit's resource must equal the target warehouse's; throws
+    `resource mismatch` otherwise.
+  - `addRoute` — source and destination resources must match (a route moves one type;
+    type conversion is refinement's job).
+  - `serialize.ts` mirrors both invariants at the import boundary for hand-edited saves,
+    plus a non-empty-string check on every `resource` tag. `checkTable` now passes the
+    entry id to its component checker so cross-table resource lookups work.
+- **The flow solver is untouched.** No route crosses types, so each connected component
+  of the route DAG is monochromatic — the solver stays per-type by construction. Every
+  quantity remains a scalar closed form (analytic litmus holds, ADR-0001 §2).
+- App demo world (`packages/app/src/sim/world.ts`): the ore chain (Pier → Depot route)
+  is `ore`; the Quarry build site is `stone`. Exercises typing end-to-end. `SavedWorld`
+  envelope is unchanged (resource rides inside the core `SaveDocument`).
+- Tests: new `resource typing` scenarios in `sim.test.ts` (extractor + route mismatch
+  rejected) and import-boundary cases in `serialize.test.ts` (empty tag, extractor
+  deposit/warehouse mismatch, route type mismatch). All existing scenarios updated for
+  the new `resource` arg.
 
-`typecheck | lint | format | test` all green (54 tests). Production build clean.
+`typecheck | lint | format | test` all green (59 tests). Production build clean.
 
-Note on the demo topology (came up while testing): Pier has two independent drains — the
-route to Depot (subject to backpressure: a full Depot throttles the incoming route to 0)
-**and** a local pull of 3/s (unrelated to Depot). Pier only visibly drains once the Ore
-vein hits its floor (×2 → ×0.5, extractor output falls below the 3/s local pull) — now
-observable via the deposit bars. Route backpressure is working; the drain is depletion.
-
-**Pagehide race — resolved for commands.** The build command saves synchronously on
-click (save-on-command), so a dropped async pagehide save no longer loses the action:
-worst case the next load recomputes the _same_ built state. The 15s autosave + lifecycle
-saves remain the backstop for time-only drift. Any _future_ mutating command must follow
-the same save-on-command pattern.
+Note: resource type is not yet surfaced in the readout UI — the Pixi rows still label by
+warehouse/deposit name only. Optional polish; add it when refinement makes types
+player-relevant.
 
 ## Next session
 
-Per DESIGN.md (litmus-test each new mechanic against ADR-0001 §2 first):
+Both pillars below are now unblocked by resource typing (litmus-test each against
+ADR-0001 §2 first):
 
-1. **Resource typing** — the upstream unblocker. Warehouses currently store an untyped
-   scalar; everything is fungible "stuff". Typed inventories are the prerequisite for
-   both **refinement** (raw → refined, the milestone's one tier) and a _real_ build layer
-   (buildings "cost resources"). This is a core-package change (warehouse/extractor/route
-   all move typed quantities) — design it deliberately and check the analytic litmus
-   (per-type closed-form amounts; the flow solver stays per-type).
+1. **Refinement** — a converter component: consumes type A from one warehouse at a rate,
+   produces type B into another. Couples two warehouse regimes much like a route, so it
+   should ride the same derive/solve path (settle its throughput against source supply
+   and destination acceptance, then schedule crossings). Keep the math per-type and
+   closed-form; the converter's rate is stepwise-constant between events.
 
-2. Then either **refinement** (a converter component: consumes type A at a rate, produces
-   type B — couples two warehouse regimes much like a route) or the **Building pillar**
-   (fixed slots, placement cost, siting/adjacency). Both depend on step 1.
+2. **Building pillar** — fixed slots, placement cost (now expressible: deduct typed
+   resources from warehouses on build), siting/adjacency. This is where the current thin
+   `buildExtractor` app command grows into a real cost-gated build layer.
 
 Engine follow-ups (do when they start to matter):
 
-- `removeRoute` (and warehouse/extractor deletion generally) — needed once the UI lets
-  players tear down structures. Add a single table-deletion function per module (perf
-  doc: deletion through one function) and a `deriveAll` after.
+- `removeRoute` (and warehouse/extractor/deposit deletion generally) — needed once the UI
+  lets players tear down structures. One table-deletion function per module (perf doc:
+  deletion through one function) and a `deriveAll` after.
 - `solveRoutes` rebuilds adjacency + topo order and re-solves the whole graph every
   event/command (global O(N+R)). Fine at design scale; the natural place for targeted
   downstream invalidation if a profile ever shows it.
-- Stale events linger in the heap until their time passes (lazy deletion); the
-  serializer filters them. Consider periodic compaction only if heap size ever matters
-  during very long offline spans.
+- Stale events linger in the heap until their time passes (lazy deletion); the serializer
+  filters them. Consider periodic compaction only if heap size ever matters during very
+  long offline spans.
+
+Heads-up: the working tree has unrelated **PWA integration** changes in flight
+(`vite-plugin-pwa`, `workbox-window`, `UpdatePrompt.tsx`, `vite-env.d.ts`, app
+`package.json`/`vite.config.ts`, `bun.lock`) that predate this session and are not part of
+resource typing — keep them out of the resource-typing commit.

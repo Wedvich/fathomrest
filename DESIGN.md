@@ -47,6 +47,14 @@ extract, refine, research, and sail out to discover new islands.
   starvation resolves within the event that triggers it (ADR-0001 §route solver), so a
   saturated network jams cleanly for the player to unpick — find the true bottleneck (a
   route cap, a closed sink, or a dry deposit), not just any full warehouse.
+- **Resources are typed; a warehouse (and its deposit) holds exactly one type.**
+  Extractors and transport routes only connect matching types (enforced at the command
+  and import boundaries); changing type is refinement's job (a converter), never a
+  route's. This keeps every quantity a per-type scalar closed form and leaves the flow
+  solver unchanged — each route-DAG component is single-type by construction, so the
+  solver "stays per-type" for free. Typed inventories are the prerequisite for refinement
+  (raw → refined) and resource-costed building. The type tag is opaque to the core
+  (`ResourceType`, a branded string); the resource set is authored content in the app.
 - Longer refinement chains require networking specialized islands — that is the
   strategy layer.
 

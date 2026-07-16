@@ -12,6 +12,7 @@ import {
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
 import type { PrngState } from "./prng.ts";
+import type { ResourceType } from "./resource.ts";
 import { isStaleEvent } from "./sim.ts";
 import type { SimState } from "./state.ts";
 
@@ -122,10 +123,18 @@ function checkPositive(value: number, field: string): void {
   }
 }
 
+// Resource tags are opaque strings; the sim compares them for equality (route/extractor
+// type-match), so an empty or non-string tag is a corrupt document.
+function checkResource(value: string, field: string): void {
+  if (typeof value !== "string" || value.length === 0) {
+    throw invalid(`${field} must be a non-empty string`);
+  }
+}
+
 function checkTable<T extends object>(
   entries: TableEntries<T>,
   field: string,
-  checkComponent: (component: T, at: string) => void,
+  checkComponent: (component: T, at: string, id: number) => void,
 ): Set<number> {
   if (!Array.isArray(entries)) {
     throw invalid(`${field} must be an array`);
@@ -143,7 +152,7 @@ function checkTable<T extends object>(
     if (component === null || typeof component !== "object") {
       throw invalid(`${field}[${id}] must be an object`);
     }
-    checkComponent(component, `${field}[${id}]`);
+    checkComponent(component, `${field}[${id}]`, id);
     ids.add(id);
   }
   return ids;
@@ -176,7 +185,10 @@ function validateDocument(doc: SaveDocument): void {
   checkFinite(doc.prng.b, "prng.b");
   checkFinite(doc.prng.c, "prng.c");
   checkFinite(doc.prng.d, "prng.d");
-  const warehouseIds = checkTable(doc.warehouses, "warehouses", (warehouse, at) => {
+  const warehouseResource = new Map<number, ResourceType>();
+  const warehouseIds = checkTable(doc.warehouses, "warehouses", (warehouse, at, id) => {
+    checkResource(warehouse.resource, `${at}.resource`);
+    warehouseResource.set(id, warehouse.resource);
     checkPositive(warehouse.capacity, `${at}.capacity`);
     checkFinite(warehouse.anchorAmount, `${at}.anchorAmount`);
     if (warehouse.anchorAmount < 0 || warehouse.anchorAmount > warehouse.capacity) {
@@ -193,7 +205,10 @@ function validateDocument(doc: SaveDocument): void {
       throw invalid(`${at}.regime must be one of ${WAREHOUSE_REGIMES.join(", ")}`);
     }
   });
-  const depositIds = checkTable(doc.deposits, "deposits", (deposit, at) => {
+  const depositResource = new Map<number, ResourceType>();
+  const depositIds = checkTable(doc.deposits, "deposits", (deposit, at, id) => {
+    checkResource(deposit.resource, `${at}.resource`);
+    depositResource.set(id, deposit.resource);
     if (!Array.isArray(deposit.tiers)) {
       throw invalid(`${at}.tiers must be an array`);
     }
@@ -230,6 +245,11 @@ function validateDocument(doc: SaveDocument): void {
     if (!warehouseIds.has(extractor.warehouseId)) {
       throw invalid(`${at}.warehouseId ${extractor.warehouseId} has no warehouse`);
     }
+    // Mirror addExtractor's type-match: an ore extractor feeding a stone warehouse is a
+    // corrupt document (the solver ignores types, so this never throws deep in advance).
+    if (depositResource.get(extractor.depositId) !== warehouseResource.get(extractor.warehouseId)) {
+      throw invalid(`${at} deposit and warehouse resources must match`);
+    }
   });
   checkTable(doc.routes, "routes", (route, at) => {
     checkFinite(route.srcId, `${at}.srcId`);
@@ -242,6 +262,11 @@ function validateDocument(doc: SaveDocument): void {
     }
     if (route.srcId === route.dstId) {
       throw invalid(`${at} source and destination must differ`);
+    }
+    // Mirror addRoute's type-match: a route can only move one resource between same-typed
+    // warehouses.
+    if (warehouseResource.get(route.srcId) !== warehouseResource.get(route.dstId)) {
+      throw invalid(`${at} source and destination resources must match`);
     }
     checkNonNegative(route.cap, `${at}.cap`);
     checkNonNegative(route.flow, `${at}.flow`);

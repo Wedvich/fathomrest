@@ -7,6 +7,7 @@
 // command layer skips eventSeq invalidation and breaks replay determinism.
 
 export type { Id } from "./ids.ts";
+export { resourceType, type ResourceType } from "./resource.ts";
 export type { PrngState } from "./prng.ts";
 export { offlineElapsedSeconds } from "./clock.ts";
 export type { EventKind, EventQueue, SimEvent } from "./events.ts";

@@ -8,6 +8,7 @@ import {
   deserializeState,
   forEachExtractor,
   offlineElapsedSeconds,
+  resourceType,
   serializeState,
   setWarehousePullRate,
   type Id,
@@ -46,18 +47,24 @@ export interface SavedWorld {
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const state = createSimState(seed, wallTimeMs);
 
-  // Rich vein that depletes to a lean perpetual floor.
-  const oreDeposit = addDeposit(state, 0, [{ amount: 500, multiplier: 2 }], 0.5);
+  // Two resource types exercise typing end-to-end: the ore chain (Pier -> Depot route)
+  // stays ore; the Quarry build site is stone. A route or extractor crossing types is
+  // rejected by the core (sim.ts).
+  const ore = resourceType("ore");
+  const stone = resourceType("stone");
 
-  const pierWarehouse = addWarehouse(state, 0, 100);
-  const depotWarehouse = addWarehouse(state, 0, 200);
+  // Rich vein that depletes to a lean perpetual floor.
+  const oreDeposit = addDeposit(state, 0, ore, [{ amount: 500, multiplier: 2 }], 0.5);
+
+  const pierWarehouse = addWarehouse(state, 0, ore, 100);
+  const depotWarehouse = addWarehouse(state, 0, ore, 200);
 
   addExtractor(state, 0, 5, oreDeposit, pierWarehouse);
 
   // Unworked vein + its idle warehouse: no extractor until the player builds one, so the
   // Quarry row sits at zero until the Build command wires a producer (buildExtractor).
-  const graniteDeposit = addDeposit(state, 0, [{ amount: 500, multiplier: 2 }], 0.5);
-  const quarryWarehouse = addWarehouse(state, 0, 100);
+  const graniteDeposit = addDeposit(state, 0, stone, [{ amount: 500, multiplier: 2 }], 0.5);
+  const quarryWarehouse = addWarehouse(state, 0, stone, 100);
 
   // Pier drains a little locally and ships the surplus up the route to the depot.
   setWarehousePullRate(state, 0, pierWarehouse, 3);

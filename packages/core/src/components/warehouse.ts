@@ -1,4 +1,5 @@
 import type { Id } from "../ids.ts";
+import type { ResourceType } from "../resource.ts";
 import type { SimState } from "../state.ts";
 
 // Piecewise regime between events (ADR-0001 §2: saturation is a regime, not an
@@ -8,6 +9,9 @@ export const WAREHOUSE_REGIMES = ["tracking", "pinned-full", "pinned-empty"] as 
 export type WarehouseRegime = (typeof WAREHOUSE_REGIMES)[number];
 
 export interface Warehouse {
+  // The single resource this warehouse stores; incoming extractors and routes must match
+  // it (sim.ts: addExtractor, addRoute). Opaque tag, compared only for equality.
+  resource: ResourceType;
   capacity: number;
   // Closed-form anchor: amount(t) = anchorAmount + netRate * (t - anchorTime), clamped
   // to [0, capacity]. Always evaluated from the anchor, never accumulated incrementally
@@ -33,8 +37,13 @@ export interface Warehouse {
   eventSeq: number;
 }
 
-export function createWarehouse(capacity: number, anchorTime: number): Warehouse {
+export function createWarehouse(
+  resource: ResourceType,
+  capacity: number,
+  anchorTime: number,
+): Warehouse {
   return {
+    resource,
     capacity,
     anchorAmount: 0,
     anchorTime,

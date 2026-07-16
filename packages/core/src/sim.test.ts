@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { getWarehouse } from "./components/warehouse.ts";
+import { resourceType } from "./resource.ts";
 import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
   addDeposit,
@@ -19,15 +20,19 @@ import {
 } from "./sim.ts";
 import { createSimState, type SimState } from "./state.ts";
 
+// Single shared type for the many single-resource scenarios; type-match cases below use
+// their own distinct tags.
+const R = resourceType("stuff");
+
 function toyChain(): {
   state: SimState;
   warehouseId: ReturnType<typeof addWarehouse>;
   extractorId: ReturnType<typeof addExtractor>;
 } {
   const state = createSimState(42, 0);
-  const warehouseId = addWarehouse(state, 0, 100);
+  const warehouseId = addWarehouse(state, 0, R, 100);
   // Pure-floor deposit at multiplier 1: a plain perpetual producer.
-  const depositId = addDeposit(state, 0, [], 1);
+  const depositId = addDeposit(state, 0, R, [], 1);
   const extractorId = addExtractor(state, 0, 2, depositId, warehouseId);
   setWarehousePullRate(state, 0, warehouseId, 0.5);
   return { state, warehouseId, extractorId };
@@ -91,10 +96,11 @@ describe("toy chain", () => {
 describe("deposits", () => {
   it("steps extraction down through richness tiers to the floor trickle", () => {
     const state = createSimState(42, 0);
-    const warehouseId = addWarehouse(state, 0, 10_000);
+    const warehouseId = addWarehouse(state, 0, R, 10_000);
     const depositId = addDeposit(
       state,
       0,
+      R,
       [
         { amount: 100, multiplier: 2 },
         { amount: 100, multiplier: 1 },
@@ -129,8 +135,8 @@ describe("deposits", () => {
 
   it("pauses depletion while the warehouse is pinned full and resumes on pull", () => {
     const state = createSimState(42, 0);
-    const warehouseId = addWarehouse(state, 0, 50);
-    const depositId = addDeposit(state, 0, [{ amount: 100, multiplier: 1 }], 0);
+    const warehouseId = addWarehouse(state, 0, R, 50);
+    const depositId = addDeposit(state, 0, R, [{ amount: 100, multiplier: 1 }], 0);
     const extractorId = addExtractor(state, 0, 2, depositId, warehouseId);
 
     // Fills at t=25 with 50 deposit units left; pull is 0, so depletion pauses.
@@ -155,21 +161,23 @@ describe("deposits", () => {
 
   it("rejects malformed tier tables at the command boundary", () => {
     const state = createSimState(42, 0);
-    expect(() => addDeposit(state, 0, [{ amount: 0, multiplier: 1 }], 1)).toThrow(/amount/);
-    expect(() => addDeposit(state, 0, [{ amount: Number.NaN, multiplier: 1 }], 1)).toThrow(
+    expect(() => addDeposit(state, 0, R, [{ amount: 0, multiplier: 1 }], 1)).toThrow(/amount/);
+    expect(() => addDeposit(state, 0, R, [{ amount: Number.NaN, multiplier: 1 }], 1)).toThrow(
       /amount/,
     );
-    expect(() => addDeposit(state, 0, [{ amount: 10, multiplier: -1 }], 1)).toThrow(/multiplier/);
-    expect(() => addDeposit(state, 0, [], Number.POSITIVE_INFINITY)).toThrow(/floor/);
+    expect(() => addDeposit(state, 0, R, [{ amount: 10, multiplier: -1 }], 1)).toThrow(
+      /multiplier/,
+    );
+    expect(() => addDeposit(state, 0, R, [], Number.POSITIVE_INFINITY)).toThrow(/floor/);
   });
 });
 
 describe("routes", () => {
   it("carries an instant rate-capped flow between warehouses", () => {
     const state = createSimState(42, 0);
-    const source = addWarehouse(state, 0, 1_000);
-    const dest = addWarehouse(state, 0, 1_000);
-    const deposit = addDeposit(state, 0, [], 1);
+    const source = addWarehouse(state, 0, R, 1_000);
+    const dest = addWarehouse(state, 0, R, 1_000);
+    const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source); // source inflow 5/s
     const route = addRoute(state, 0, source, dest, 3); // cap below inflow, so runs at cap
 
@@ -183,9 +191,9 @@ describe("routes", () => {
 
   it("backs up the source when the destination jams (backpressure travels upstream)", () => {
     const state = createSimState(42, 0);
-    const source = addWarehouse(state, 0, 100);
-    const dest = addWarehouse(state, 0, 50);
-    const deposit = addDeposit(state, 0, [], 1);
+    const source = addWarehouse(state, 0, R, 100);
+    const dest = addWarehouse(state, 0, R, 50);
+    const deposit = addDeposit(state, 0, R, [], 1);
     const extractor = addExtractor(state, 0, 20, deposit, source); // ample supply
     const route = addRoute(state, 0, source, dest, 10);
     // dest has no consumer, so it fills at the route rate 10/s and jams at t=5.
@@ -203,9 +211,9 @@ describe("routes", () => {
 
   it("supply-limits the route when the source runs dry (starvation travels downstream)", () => {
     const state = createSimState(42, 0);
-    const source = addWarehouse(state, 0, 100);
-    const dest = addWarehouse(state, 0, 100);
-    const deposit = addDeposit(state, 0, [], 1);
+    const source = addWarehouse(state, 0, R, 100);
+    const dest = addWarehouse(state, 0, R, 100);
+    const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 3, deposit, source); // trickle: below the route cap
     const route = addRoute(state, 0, source, dest, 10);
     setWarehousePullRate(state, 0, dest, 5); // wants more than the route can supply
@@ -224,10 +232,10 @@ describe("routes", () => {
   it("splits a demand-limited hub across incoming routes, reflowing a starved one", () => {
     // P is well-supplied, Q is a trickle; both feed hub D which can only accept its pull.
     const state = createSimState(42, 0);
-    const p = addWarehouse(state, 0, 100);
-    const q = addWarehouse(state, 0, 100);
-    const hub = addWarehouse(state, 0, 50);
-    const deposit = addDeposit(state, 0, [], 1);
+    const p = addWarehouse(state, 0, R, 100);
+    const q = addWarehouse(state, 0, R, 100);
+    const hub = addWarehouse(state, 0, R, 50);
+    const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 20, deposit, p); // P can push its full route cap
     addExtractor(state, 0, 1, deposit, q); // Q is supply-limited to 1/s
     const fromP = addRoute(state, 0, p, hub, 10);
@@ -247,10 +255,10 @@ describe("routes", () => {
   it("un-jams a saturated chain within a single command (cascade resolves in one derive)", () => {
     // A -> B -> C, sink at C. With C closed, the whole chain jams full.
     const state = createSimState(42, 0);
-    const a = addWarehouse(state, 0, 100);
-    const b = addWarehouse(state, 0, 100);
-    const c = addWarehouse(state, 0, 100);
-    const deposit = addDeposit(state, 0, [], 1);
+    const a = addWarehouse(state, 0, R, 100);
+    const b = addWarehouse(state, 0, R, 100);
+    const c = addWarehouse(state, 0, R, 100);
+    const deposit = addDeposit(state, 0, R, [], 1);
     const extractor = addExtractor(state, 0, 50, deposit, a);
     const ab = addRoute(state, 0, a, b, 20);
     const bc = addRoute(state, 0, b, c, 20);
@@ -275,13 +283,31 @@ describe("routes", () => {
 
   it("rejects self-loops and cycles at the command boundary", () => {
     const state = createSimState(42, 0);
-    const a = addWarehouse(state, 0, 100);
-    const b = addWarehouse(state, 0, 100);
+    const a = addWarehouse(state, 0, R, 100);
+    const b = addWarehouse(state, 0, R, 100);
     expect(() => addRoute(state, 0, a, a, 5)).toThrow(/differ/);
     addRoute(state, 0, a, b, 5);
     expect(() => addRoute(state, 0, b, a, 5)).toThrow(/cycle/);
     expect(() => addRoute(state, 0, a, b, Number.NaN)).toThrow(/cap/);
     expect(() => addRoute(state, 0, a, b, -1)).toThrow(/cap/);
+  });
+});
+
+describe("resource typing", () => {
+  it("rejects an extractor whose deposit and warehouse types differ", () => {
+    const state = createSimState(42, 0);
+    const oreWarehouse = addWarehouse(state, 0, resourceType("ore"), 100);
+    const stoneDeposit = addDeposit(state, 0, resourceType("stone"), [], 1);
+    expect(() => addExtractor(state, 0, 2, stoneDeposit, oreWarehouse)).toThrow(
+      /resource mismatch/,
+    );
+  });
+
+  it("rejects a route between differently typed warehouses", () => {
+    const state = createSimState(42, 0);
+    const oreWarehouse = addWarehouse(state, 0, resourceType("ore"), 100);
+    const stoneWarehouse = addWarehouse(state, 0, resourceType("stone"), 100);
+    expect(() => addRoute(state, 0, oreWarehouse, stoneWarehouse, 5)).toThrow(/resource mismatch/);
   });
 });
 
@@ -294,10 +320,11 @@ describe("determinism", () => {
   // command-driven regime flips.
   function runScenario(stepCount: number): SaveDocument {
     const state = createSimState(7, 0);
-    const warehouseId = addWarehouse(state, 0, 500);
+    const warehouseId = addWarehouse(state, 0, R, 500);
     const depositId = addDeposit(
       state,
       0,
+      R,
       [
         { amount: 60_000, multiplier: 1.5 },
         { amount: 90_000, multiplier: 0.75 },
@@ -340,10 +367,10 @@ describe("determinism", () => {
   // graph must still replay bit-identically across advance granularities.
   function runRouteScenario(stepCount: number): SaveDocument {
     const state = createSimState(13, 0);
-    const a = addWarehouse(state, 0, 400);
-    const b = addWarehouse(state, 0, 300);
-    const c = addWarehouse(state, 0, 500);
-    const deposit = addDeposit(state, 0, [{ amount: 50_000, multiplier: 2 }], 0.5);
+    const a = addWarehouse(state, 0, R, 400);
+    const b = addWarehouse(state, 0, R, 300);
+    const c = addWarehouse(state, 0, R, 500);
+    const deposit = addDeposit(state, 0, R, [{ amount: 50_000, multiplier: 2 }], 0.5);
     addExtractor(state, 0, 4, deposit, a);
     const ab = addRoute(state, 0, a, b, 3);
     addRoute(state, 0, a, c, 2); // fan-out from A

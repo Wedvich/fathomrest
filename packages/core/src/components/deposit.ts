@@ -1,4 +1,5 @@
 import type { Id } from "../ids.ts";
+import type { ResourceType } from "../resource.ts";
 import type { SimState } from "../state.ts";
 
 // A rich phase decaying to a perpetual trickle (DESIGN.md economy). The "curve" is
@@ -12,6 +13,9 @@ export interface DepositTier {
 }
 
 export interface Deposit {
+  // The resource this deposit yields; extractors on it must feed a warehouse of the same
+  // type (sim.ts: addExtractor). Opaque tag, compared only for equality.
+  resource: ResourceType;
   tiers: readonly DepositTier[];
   // Index into tiers; tiers.length means the floor regime (infinite, floorMultiplier).
   tierIndex: number;
@@ -31,12 +35,14 @@ export interface Deposit {
 // (docs/browser-performance.md: stable shapes). Tiers are copied — callers keep no
 // mutable handle into the component.
 export function createDeposit(
+  resource: ResourceType,
   tiers: readonly DepositTier[],
   floorMultiplier: number,
   anchorTime: number,
 ): Deposit {
   const first = tiers[0];
   return {
+    resource,
     tiers: tiers.map((tier) => ({ amount: tier.amount, multiplier: tier.multiplier })),
     tierIndex: 0,
     floorMultiplier,

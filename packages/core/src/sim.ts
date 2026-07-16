@@ -24,6 +24,7 @@ import {
 import { peekEvent, popEvent, pushEvent, type SimEvent } from "./events.ts";
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
+import type { ResourceType } from "./resource.ts";
 import { allocId, type SimState } from "./state.ts";
 
 // advance(t): pop and apply every event due <= t, rescheduling as regimes change.
@@ -505,13 +506,18 @@ export function routeFlow(state: SimState, id: Id): number {
 // "commands land at the current time" a mechanism, not a caller convention.
 // Version bump + save are app-layer concerns once the UI binding exists.
 
-export function addWarehouse(state: SimState, t: number, capacity: number): Id {
+export function addWarehouse(
+  state: SimState,
+  t: number,
+  resource: ResourceType,
+  capacity: number,
+): Id {
   if (!(capacity > 0)) {
     throw new Error(`warehouse capacity must be > 0, got ${capacity}`);
   }
   advance(state, t);
   const id = allocId(state);
-  setWarehouse(state, id, createWarehouse(capacity, state.epoch));
+  setWarehouse(state, id, createWarehouse(resource, capacity, state.epoch));
   deriveAll(state);
   return id;
 }
@@ -520,6 +526,7 @@ export function addWarehouse(state: SimState, t: number, capacity: number): Id {
 export function addDeposit(
   state: SimState,
   t: number,
+  resource: ResourceType,
   tiers: readonly DepositTier[],
   floorMultiplier: number,
 ): Id {
@@ -536,7 +543,7 @@ export function addDeposit(
   }
   advance(state, t);
   const id = allocId(state);
-  setDeposit(state, id, createDeposit(tiers, floorMultiplier, state.epoch));
+  setDeposit(state, id, createDeposit(resource, tiers, floorMultiplier, state.epoch));
   deriveAll(state);
   return id;
 }
@@ -551,8 +558,13 @@ export function addExtractor(
   if (!(rate >= 0)) {
     throw new Error(`extractor rate must be >= 0, got ${rate}`);
   }
-  getDeposit(state, depositId); // validates the source exists
-  getWarehouse(state, warehouseId); // validates the target exists
+  const deposit = getDeposit(state, depositId); // validates the source exists
+  const warehouse = getWarehouse(state, warehouseId); // validates the target exists
+  if (deposit.resource !== warehouse.resource) {
+    throw new Error(
+      `extractor resource mismatch: deposit yields ${deposit.resource}, warehouse stores ${warehouse.resource}`,
+    );
+  }
   advance(state, t);
   const id = allocId(state);
   setExtractor(state, id, createExtractor(rate, depositId, warehouseId));
@@ -586,8 +598,13 @@ export function addRoute(state: SimState, t: number, srcId: Id, dstId: Id, cap: 
     throw new Error(`route source and destination must differ, got ${srcId}`);
   }
   checkCap(cap);
-  getWarehouse(state, srcId); // validates the source exists
-  getWarehouse(state, dstId); // validates the destination exists
+  const src = getWarehouse(state, srcId); // validates the source exists
+  const dst = getWarehouse(state, dstId); // validates the destination exists
+  if (src.resource !== dst.resource) {
+    throw new Error(
+      `route resource mismatch: source stores ${src.resource}, destination stores ${dst.resource}`,
+    );
+  }
   const edges: [Id, Id][] = [[srcId, dstId]];
   forEachRoute(state, (_id, route) => edges.push([route.srcId, route.dstId]));
   if (topoSort(warehouseIds(state), edges) === null) {

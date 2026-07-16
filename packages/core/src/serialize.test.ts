@@ -4,6 +4,7 @@ import { offlineElapsedSeconds } from "./clock.ts";
 import { getDeposit } from "./components/deposit.ts";
 import { peekEvent } from "./events.ts";
 import { idFromNumber } from "./ids.ts";
+import { resourceType } from "./resource.ts";
 import {
   deserializeState,
   entriesToTable,
@@ -23,15 +24,17 @@ import {
 } from "./sim.ts";
 import { createSimState, type SimState } from "./state.ts";
 
+const R = resourceType("stuff");
+
 function midFlightState(): {
   state: SimState;
   warehouseId: ReturnType<typeof addWarehouse>;
   depositId: ReturnType<typeof addDeposit>;
 } {
   const state = createSimState(11, 1_000);
-  const warehouseId = addWarehouse(state, 0, 100);
+  const warehouseId = addWarehouse(state, 0, R, 100);
   // Tier large enough that the crossing stays pending through every test horizon.
-  const depositId = addDeposit(state, 0, [{ amount: 1_000, multiplier: 1 }], 0.25);
+  const depositId = addDeposit(state, 0, R, [{ amount: 1_000, multiplier: 1 }], 0.25);
   addExtractor(state, 0, 2, depositId, warehouseId);
   setWarehousePullRate(state, 0, warehouseId, 0.5);
   advance(state, 20); // mid-fill, mid-tier; both crossing events still pending
@@ -122,9 +125,9 @@ describe("serializer", () => {
 
   it("round-trips a route network and re-derives identical flows", () => {
     const state = createSimState(5, 0);
-    const source = addWarehouse(state, 0, 100);
-    const dest = addWarehouse(state, 0, 100);
-    const deposit = addDeposit(state, 0, [], 1);
+    const source = addWarehouse(state, 0, R, 100);
+    const dest = addWarehouse(state, 0, R, 100);
+    const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source);
     const route = addRoute(state, 0, source, dest, 3);
     advance(state, 10);
@@ -136,8 +139,8 @@ describe("serializer", () => {
 
   function routeDoc(): SaveDocument {
     const state = createSimState(5, 0);
-    const source = addWarehouse(state, 0, 100);
-    const dest = addWarehouse(state, 0, 100);
+    const source = addWarehouse(state, 0, R, 100);
+    const dest = addWarehouse(state, 0, R, 100);
     addRoute(state, 0, source, dest, 3);
     return serializeState(state);
   }
@@ -219,6 +222,39 @@ describe("serializer", () => {
       { ...extractor, rate: -2 },
     ]);
     expect(() => deserializeState({ ...doc, extractors })).toThrow(/rate/);
+  });
+
+  it("rejects a warehouse with an empty resource tag", () => {
+    const doc = serializeState(midFlightState().state);
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, resource: resourceType("") },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/resource/);
+  });
+
+  it("rejects an extractor whose deposit and warehouse resources differ", () => {
+    const doc = serializeState(midFlightState().state);
+    const deposits = doc.deposits.map(([id, deposit]): (typeof doc.deposits)[number] => [
+      id,
+      { ...deposit, resource: resourceType("other") },
+    ]);
+    expect(() => deserializeState({ ...doc, deposits })).toThrow(/resources must match/);
+  });
+
+  it("rejects a route between differently typed warehouses", () => {
+    const doc = routeDoc();
+    const [first] = doc.routes;
+    if (first === undefined) {
+      throw new Error("routeDoc should produce one route");
+    }
+    const [, route] = first;
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] =>
+      id === route.srcId
+        ? [id, { ...warehouse, resource: resourceType("other") }]
+        : [id, warehouse],
+    );
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/resources must match/);
   });
 
   it("rejects a structurally truncated document", () => {
