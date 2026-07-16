@@ -1,4 +1,5 @@
 import { PixiReadout } from "./PixiReadout.tsx";
+import { UpdatePrompt } from "./UpdatePrompt.tsx";
 
 export function App(): React.JSX.Element {
   return (
@@ -6,6 +7,7 @@ export function App(): React.JSX.Element {
       <h1>Fathomrest</h1>
       <p>Live sim core — warehouse levels advancing off the render clock.</p>
       <PixiReadout />
+      <UpdatePrompt />
     </main>
   );
 }
