@@ -1,0 +1,16 @@
+/* Coming Soon (Apache-2.0) — bundled as a static asset in public/fonts/.
+   License and attribution: public/fonts/Coming-Soon-LICENSE.txt.
+   Latin subset only; swap the src for the full .ttf if wider coverage is needed. */
+@font-face {
+  font-family: "Coming Soon";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/coming-soon-latin-400.woff2") format("woff2");
+}
+
+/* App-wide default so DOM UI (buttons, future React views) matches the Pixi readout.
+   Scope this down later if some surfaces want a different face. */
+:root {
+  font-family: "Coming Soon", monospace;
+}

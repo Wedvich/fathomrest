@@ -167,6 +167,17 @@ export function PixiReadout(): React.JSX.Element {
         }
       };
 
+      // Pixi v8 Text renders through the browser font system and won't re-layout when a
+      // face loads later, so ensure "Coming Soon" is decoded before the first Text is built;
+      // otherwise the first frame draws in the monospace fallback. A load failure is
+      // non-fatal — the fallback in fontFamily still renders.
+      try {
+        await document.fonts.load('16px "Coming Soon"');
+      } catch (error) {
+        console.error("Failed to load the Coming Soon font; falling back.", error);
+      }
+      if (disposed) return;
+
       await app.init({
         width: WIDTH,
         height: PADDING * 2 + ROW_HEIGHT * (world.warehouses.length + world.deposits.length),
@@ -199,16 +210,19 @@ export function PixiReadout(): React.JSX.Element {
         tint: number,
       ): { fill: Sprite; readout: Text } => {
         const row = new Container();
+        row.x = PADDING;
         row.y = PADDING + index * ROW_HEIGHT;
         const labelText = new Text({
           text: label,
-          style: { fill: 0xcfe6f2, fontSize: 15, fontFamily: "monospace" },
+          style: { fill: 0xcfe6f2, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
         });
         const readout = new Text({
           text: "",
-          style: { fill: 0x8fb2c4, fontSize: 12, fontFamily: "monospace" },
+          style: { fill: 0x8fb2c4, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
         });
-        readout.x = 90;
+        // Right-align to the bar's right edge; label stays left-aligned at x=0.
+        readout.anchor.set(1, 0);
+        readout.x = barWidth;
         const track = new Graphics().roundRect(0, 0, barWidth, BAR_HEIGHT, 4).fill(0x14303f);
         track.y = 24;
         // Plain rect Sprite, not Graphics: width is set every tick to reflect frac, and a

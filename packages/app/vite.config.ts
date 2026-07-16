@@ -11,7 +11,7 @@ export default defineConfig({
       // would race the visibility-return clock re-anchor.
       registerType: "prompt",
       workbox: {
-        globPatterns: ["**/*.{js,css,html,wasm}"],
+        globPatterns: ["**/*.{js,css,html,woff2}"],
       },
       manifest: {
         name: "Fathomrest",
