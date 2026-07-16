@@ -1,4 +1,10 @@
 import {
+  createConverter,
+  forEachConverter,
+  getConverter,
+  setConverter,
+} from "./components/converter.ts";
+import {
   createDeposit,
   forEachDeposit,
   getDeposit,
@@ -85,14 +91,15 @@ function handleEvent(state: SimState, event: SimEvent): void {
 // Full re-derivation at the current epoch — the single choke point after every event
 // and command. Phases in dependency order:
 //   1. Re-anchor every warehouse to now (freeze its amount) and cache its nominal
-//      extractor inflow — both are inputs the route solver reads as constants.
-//   2. solveRoutes: settle every route flow, each warehouse's route in/out totals and
-//      throttle levels, and the regime of saturated (pinned) warehouses. Routes make a
-//      warehouse's net rate depend on its neighbours' regimes, so this is a fixed point
-//      over the route DAG (see solveRoutes).
-//   3. Schedule crossings: with route flows settled, each warehouse's net rate is a
+//      extractor inflow — both are inputs the transfer solver reads as constants.
+//   2. solveTransfers: settle every transfer flow (routes ∪ converters), each
+//      warehouse's transfer in/out totals and throttle levels, and the regime of
+//      saturated (pinned) warehouses. Transfers make a warehouse's net rate depend on
+//      its neighbours' regimes, so this is a fixed point over the transfer DAG (see
+//      solveTransfers).
+//   3. Schedule crossings: with transfer flows settled, each warehouse's net rate is a
 //      constant and its fill/empty time is closed-form (scheduleWarehouse).
-//   4. Deposit depletion reads the (route-aware) extractor throttles from phase 2.
+//   4. Deposit depletion reads the (transfer-aware) extractor throttles from phase 2.
 // Rates are stepwise-constant between events. Global (not targeted) re-derivation is
 // O(entities) per event/command; revisit only if a profile ever shows it.
 function deriveAll(state: SimState): void {
@@ -101,9 +108,15 @@ function deriveAll(state: SimState): void {
     reanchorWarehouse(warehouse, t);
     warehouse.inflow = totalInflow(state, id);
   });
-  const { routeInflow, routeOutflow } = solveRoutes(state);
+  const { transferInflow, transferOutflow } = solveTransfers(state);
   forEachWarehouse(state, (id, warehouse) => {
-    scheduleWarehouse(state, id, warehouse, routeInflow.get(id) ?? 0, routeOutflow.get(id) ?? 0);
+    scheduleWarehouse(
+      state,
+      id,
+      warehouse,
+      transferInflow.get(id) ?? 0,
+      transferOutflow.get(id) ?? 0,
+    );
   });
   forEachDeposit(state, (id, deposit) => {
     reanchorDeposit(deposit, t);
@@ -113,7 +126,7 @@ function deriveAll(state: SimState): void {
 
 // Derive-time only: scans the extractor table for the nominal (pre-throttle) producer
 // rate into a warehouse. Queries read the cached warehouse.inflow instead (query(t) must
-// not allocate or scan). Route inflow is settled separately by solveRoutes.
+// not allocate or scan). Transfer inflow is settled separately by solveTransfers.
 function totalInflow(state: SimState, warehouseId: Id): number {
   let inflow = 0;
   forEachExtractor(state, (_id, extractor) => {
@@ -186,66 +199,107 @@ function allocateCapped(
   return level; // unreachable: each round pins >=1 competitor or returns
 }
 
-// Resolve every route flow and each warehouse's regime at the current (frozen) amounts.
+// A transfer edge is the solver's unified view of a route or a converter: both couple a
+// source and a destination warehouse. `ratio` is destination units produced per source
+// unit drawn — exactly 1 for routes, so route math is bit-identical to a route-only
+// solver (x·1 and x/1 are exact). The allowances srcCap/dstCap are ALWAYS held in
+// source units; ratio conversion happens only at the destination-side water-fill
+// (multiply going in, divide coming out).
+interface TransferEdge {
+  srcId: Id;
+  dstId: Id;
+  // Maximum draw from the source, source units (a route's cap / a converter's cap).
+  cap: number;
+  // Destination units per source unit (1 for routes, a converter's ratio > 0).
+  ratio: number;
+  // Current allowances, both in source units: srcCap set by the forward sweep of a
+  // supply-limited source, dstCap by the backward sweep of a demand-limited destination.
+  // Both start optimistic at cap. draw = min(srcCap, dstCap); feed = draw · ratio.
+  srcCap: number;
+  dstCap: number;
+  // Backing component (Route or Converter) for the cached-flow writeback.
+  component: { flow: number };
+}
+
+// Resolve every transfer flow (routes ∪ converters) and each warehouse's regime at the
+// current (frozen) amounts.
 //
-// A route is a consumer of its source and a producer for its destination, so a
+// A transfer edge is a consumer of its source and a producer for its destination, so a
 // warehouse's net rate depends on its neighbours' regimes. With amounts frozen, a
 // warehouse can only constrain flow when *saturated*: an interior warehouse (0 < amount
 // < cap) is transparent; amount == cap is pinned-full (demand-limited, DL) when it would
-// overflow and throttles its incoming routes (backpressure — travels upstream); amount
+// overflow and throttles its incoming edges (backpressure — travels upstream); amount
 // == 0 is pinned-empty (supply-limited, SL) when it would starve and throttles its
-// outgoing routes (starvation — travels downstream). A warehouse cannot be both (cap >
+// outgoing edges (starvation — travels downstream). A warehouse cannot be both (cap >
 // 0), so the two influence waves never reflect and the iteration cannot oscillate; it
-// converges in <= 2·N alternating sweeps over the route DAG (proof in ADR-0001 §route
-// solver / design notes). Cycles are rejected at the command and import boundaries, so
-// the topological order always exists; a null here means one slipped past — a loud canary,
-// never hit on valid input. SWEEP_GUARD is the analogous canary on sweep count. Every sum
-// is taken in table order and sweeps run in topological order (ties by table order) so
-// replay stays bit-identical (docs/browser-performance.md: determinism).
+// converges in <= 2·N alternating sweeps over the transfer DAG (proof in ADR-0001 §route
+// solver — a converter is just a ratio-scaled edge; a positive constant ratio preserves
+// the water-fill's monotonicity, so the bound is unchanged). Cycles are rejected at the
+// command and import boundaries, so the topological order always exists; a null here
+// means one slipped past — a loud canary, never hit on valid input. SWEEP_GUARD is the
+// analogous canary on sweep count. Every sum is taken in table order, the edge order is
+// fixed (routes first, then converters, each in table order), and sweeps run in
+// topological order (ties by table order) so replay stays bit-identical
+// (docs/browser-performance.md: determinism).
 //
-// Returns each warehouse's realized route inflow/outflow totals — intra-derive scratch
-// consumed by scheduleWarehouse in the same deriveAll, not cached on the warehouse.
-function solveRoutes(state: SimState): {
-  routeInflow: Map<Id, number>;
-  routeOutflow: Map<Id, number>;
+// Returns each warehouse's realized transfer inflow/outflow totals — intra-derive
+// scratch consumed by scheduleWarehouse in the same deriveAll, not cached on the
+// warehouse. Inflow is in the destination's units (converter feed = draw · ratio);
+// outflow is in the source's units (draw).
+function solveTransfers(state: SimState): {
+  transferInflow: Map<Id, number>;
+  transferOutflow: Map<Id, number>;
 } {
   const ids: Id[] = [];
-  const incoming = new Map<Id, Id[]>();
-  const outgoing = new Map<Id, Id[]>();
+  const incoming = new Map<Id, TransferEdge[]>();
+  const outgoing = new Map<Id, TransferEdge[]>();
   forEachWarehouse(state, (id) => {
     ids.push(id);
     incoming.set(id, []);
     outgoing.set(id, []);
   });
-  const edges: [Id, Id][] = [];
-  forEachRoute(state, (id, route) => {
-    outgoing.get(route.srcId)?.push(id);
-    incoming.get(route.dstId)?.push(id);
-    edges.push([route.srcId, route.dstId]);
+  const edgeList: TransferEdge[] = [];
+  forEachRoute(state, (_id, route) => {
+    edgeList.push({
+      srcId: route.srcId,
+      dstId: route.dstId,
+      cap: route.cap,
+      ratio: 1,
+      srcCap: route.cap,
+      dstCap: route.cap,
+      component: route,
+    });
   });
-  const order = topoSort(ids, edges);
+  forEachConverter(state, (_id, converter) => {
+    edgeList.push({
+      srcId: converter.srcId,
+      dstId: converter.dstId,
+      cap: converter.cap,
+      ratio: converter.ratio,
+      srcCap: converter.cap,
+      dstCap: converter.cap,
+      component: converter,
+    });
+  });
+  const graphEdges: [Id, Id][] = [];
+  for (const edge of edgeList) {
+    outgoing.get(edge.srcId)?.push(edge);
+    incoming.get(edge.dstId)?.push(edge);
+    graphEdges.push([edge.srcId, edge.dstId]);
+  }
+  const order = topoSort(ids, graphEdges);
   if (order === null) {
-    throw new Error("route graph has a cycle — solver invariant violated");
+    throw new Error("transfer graph has a cycle — solver invariant violated");
   }
   const reverseOrder = [...order].reverse();
 
-  // Each route's flow is min(srcCap, dstCap): the source's current allowance (set by the
-  // forward sweep of an SL source) and the destination's current allowance (set by the
-  // backward sweep of a DL destination). Both start optimistic at the route's cap.
-  const srcCap = new Map<Id, number>();
-  const dstCap = new Map<Id, number>();
-  forEachRoute(state, (id, route) => {
-    srcCap.set(id, route.cap);
-    dstCap.set(id, route.cap);
-  });
-  const flowOf = (routeId: Id): number =>
-    Math.min(srcCap.get(routeId) ?? 0, dstCap.get(routeId) ?? 0);
+  // Realized draw from the source (source units); the destination receives draw · ratio.
+  const drawOf = (edge: TransferEdge): number => Math.min(edge.srcCap, edge.dstCap);
 
   const weights: number[] = [];
   const ceilings: number[] = [];
   const alloc: number[] = [];
-  const prevFlow = new Map<Id, number>();
-  forEachRoute(state, (id) => prevFlow.set(id, flowOf(id)));
+  const prevDraw = edgeList.map(drawOf);
 
   const sweepGuard = 4 * (ids.length + 1);
   let converged = false;
@@ -257,7 +311,9 @@ function solveRoutes(state: SimState): {
     });
 
     // Forward sweep (sources first): a supply-limited source throttles its outgoing
-    // consumers (sink + outgoing routes) to what it can actually supply.
+    // consumers (sink + outgoing edges) to what it can actually supply. Every quantity
+    // here is in this warehouse's units: incoming feed is draw · ratio; outgoing
+    // allowances are already source units.
     for (const id of order) {
       const warehouse = getWarehouse(state, id);
       if (warehouse.anchorAmount > 0) {
@@ -265,36 +321,39 @@ function solveRoutes(state: SimState): {
       }
       const outs = outgoing.get(id) ?? [];
       let grossIn = warehouse.inflow;
-      for (const routeId of incoming.get(id) ?? []) {
-        grossIn += flowOf(routeId);
+      for (const edge of incoming.get(id) ?? []) {
+        grossIn += drawOf(edge) * edge.ratio;
       }
       let desiredOut = warehouse.pullRate;
-      for (const routeId of outs) {
-        desiredOut += dstCap.get(routeId) ?? 0;
+      for (const edge of outs) {
+        desiredOut += edge.dstCap;
       }
       if (desiredOut < grossIn) {
-        for (const routeId of outs) {
-          srcCap.set(routeId, getRoute(state, routeId).cap);
+        for (const edge of outs) {
+          edge.srcCap = edge.cap;
         }
-        continue; // not supply-limited: outgoing routes bounded only by their dest
+        continue; // not supply-limited: outgoing edges bounded only by their dest
       }
       weights[0] = warehouse.pullRate;
       ceilings[0] = warehouse.pullRate;
-      for (const [i, routeId] of outs.entries()) {
-        weights[i + 1] = getRoute(state, routeId).cap;
-        ceilings[i + 1] = dstCap.get(routeId) ?? 0;
+      for (const [i, edge] of outs.entries()) {
+        weights[i + 1] = edge.cap;
+        ceilings[i + 1] = edge.dstCap;
       }
       weights.length = outs.length + 1;
       ceilings.length = outs.length + 1;
       warehouse.outflowThrottle = allocateCapped(grossIn, weights, ceilings, alloc);
       warehouse.regime = "pinned-empty";
-      for (const [i, routeId] of outs.entries()) {
-        srcCap.set(routeId, alloc[i + 1] ?? 0);
+      for (const [i, edge] of outs.entries()) {
+        edge.srcCap = alloc[i + 1] ?? 0;
       }
     }
 
     // Backward sweep (sinks first): a demand-limited destination throttles its incoming
-    // producers (extractor pool + incoming routes) to what it can actually accept.
+    // producers (extractor pool + incoming edges) to what it can actually accept. Every
+    // quantity here is in this warehouse's (destination) units: incoming allowances
+    // scale by ratio going into the water-fill and the granted allowance divides by
+    // ratio coming out — the only place ratio conversion happens.
     for (const id of reverseOrder) {
       const warehouse = getWarehouse(state, id);
       if (warehouse.anchorAmount < warehouse.capacity) {
@@ -302,71 +361,72 @@ function solveRoutes(state: SimState): {
       }
       const ins = incoming.get(id) ?? [];
       let grossOut = warehouse.pullRate;
-      for (const routeId of outgoing.get(id) ?? []) {
-        grossOut += flowOf(routeId);
+      for (const edge of outgoing.get(id) ?? []) {
+        grossOut += drawOf(edge);
       }
       let desiredIn = warehouse.inflow;
-      for (const routeId of ins) {
-        desiredIn += srcCap.get(routeId) ?? 0;
+      for (const edge of ins) {
+        desiredIn += edge.srcCap * edge.ratio;
       }
       if (desiredIn < grossOut) {
-        for (const routeId of ins) {
-          dstCap.set(routeId, getRoute(state, routeId).cap);
+        for (const edge of ins) {
+          edge.dstCap = edge.cap;
         }
-        continue; // not demand-limited: incoming routes bounded only by their source
+        continue; // not demand-limited: incoming edges bounded only by their source
       }
       weights[0] = warehouse.inflow;
       ceilings[0] = warehouse.inflow;
-      for (const [i, routeId] of ins.entries()) {
-        weights[i + 1] = getRoute(state, routeId).cap;
-        ceilings[i + 1] = srcCap.get(routeId) ?? 0;
+      for (const [i, edge] of ins.entries()) {
+        weights[i + 1] = edge.cap * edge.ratio;
+        ceilings[i + 1] = edge.srcCap * edge.ratio;
       }
       weights.length = ins.length + 1;
       ceilings.length = ins.length + 1;
       warehouse.inflowThrottle = allocateCapped(grossOut, weights, ceilings, alloc);
       warehouse.regime = "pinned-full";
-      for (const [i, routeId] of ins.entries()) {
-        dstCap.set(routeId, alloc[i + 1] ?? 0);
+      for (const [i, edge] of ins.entries()) {
+        edge.dstCap = (alloc[i + 1] ?? 0) / edge.ratio;
       }
     }
 
     converged = true;
-    forEachRoute(state, (id) => {
-      const flow = flowOf(id);
-      if (flow !== prevFlow.get(id)) {
+    for (const [i, edge] of edgeList.entries()) {
+      const draw = drawOf(edge);
+      if (draw !== prevDraw[i]) {
         converged = false;
       }
-      prevFlow.set(id, flow);
-    });
+      prevDraw[i] = draw;
+    }
   }
   if (!converged) {
-    throw new Error(`route solver did not converge in ${sweepGuard} sweeps`);
+    throw new Error(`transfer solver did not converge in ${sweepGuard} sweeps`);
   }
 
-  const routeInflow = new Map<Id, number>();
-  const routeOutflow = new Map<Id, number>();
+  const transferInflow = new Map<Id, number>();
+  const transferOutflow = new Map<Id, number>();
   for (const id of ids) {
-    routeInflow.set(id, 0);
-    routeOutflow.set(id, 0);
+    transferInflow.set(id, 0);
+    transferOutflow.set(id, 0);
   }
-  forEachRoute(state, (id, route) => {
-    route.flow = flowOf(id);
-    routeInflow.set(route.dstId, (routeInflow.get(route.dstId) ?? 0) + route.flow);
-    routeOutflow.set(route.srcId, (routeOutflow.get(route.srcId) ?? 0) + route.flow);
-  });
-  return { routeInflow, routeOutflow };
+  for (const edge of edgeList) {
+    const draw = drawOf(edge);
+    edge.component.flow = draw;
+    transferInflow.set(edge.dstId, (transferInflow.get(edge.dstId) ?? 0) + draw * edge.ratio);
+    transferOutflow.set(edge.srcId, (transferOutflow.get(edge.srcId) ?? 0) + draw);
+  }
+  return { transferInflow, transferOutflow };
 }
 
-// Set net rate and schedule the next crossing, trusting the regime and route totals the
-// solver already settled. Callers must have re-anchored the warehouse and run solveRoutes
-// first, passing that warehouse's realized route in/out totals. Pins hold their boundary
-// value and generate no event churn.
+// Set net rate and schedule the next crossing, trusting the regime and transfer totals
+// the solver already settled. Callers must have re-anchored the warehouse and run
+// solveTransfers first, passing that warehouse's realized transfer in/out totals. Pins
+// hold their boundary value and generate no event churn.
 function scheduleWarehouse(
   state: SimState,
   id: Id,
   warehouse: Warehouse,
-  routeInflow: number,
-  routeOutflow: number,
+  transferInflow: number,
+  transferOutflow: number,
 ): void {
   warehouse.eventSeq += 1; // invalidates any scheduled crossing for this warehouse
   if (warehouse.regime === "pinned-full") {
@@ -379,7 +439,7 @@ function scheduleWarehouse(
     warehouse.netRate = 0;
     return;
   }
-  const net = warehouse.inflow + routeInflow - warehouse.pullRate - routeOutflow;
+  const net = warehouse.inflow + transferInflow - warehouse.pullRate - transferOutflow;
   warehouse.netRate = net;
   const amount = warehouse.anchorAmount;
   if (net > 0) {
@@ -500,6 +560,17 @@ export function warehouseOutflowRate(state: SimState, id: Id): number {
 
 export function routeFlow(state: SimState, id: Id): number {
   return getRoute(state, id).flow;
+}
+
+// Realized converter consumption from its source, in source (A) units.
+export function converterDraw(state: SimState, id: Id): number {
+  return getConverter(state, id).flow;
+}
+
+// Realized converter production into its destination, in destination (B) units.
+export function converterFeed(state: SimState, id: Id): number {
+  const converter = getConverter(state, id);
+  return converter.flow * converter.ratio;
 }
 
 // Commands (ADR-0001 implementation notes): validate -> advance to the command time ->
@@ -677,13 +748,23 @@ export function setWarehousePullRate(state: SimState, t: number, id: Id, pullRat
 
 function checkCap(cap: number): void {
   if (!Number.isFinite(cap) || !(cap >= 0)) {
-    throw new Error(`route cap must be finite and >= 0, got ${cap}`);
+    throw new Error(`transfer cap must be finite and >= 0, got ${cap}`);
   }
 }
 
-// Routes stay a DAG (solveRoutes relies on it): reject self-loops and any edge that would
-// close a cycle at the command boundary, so the solver never faces circulating flow. The
-// proposed edge plus the existing routes must still topologically sort.
+// Transfers (routes ∪ converters) stay one combined DAG (solveTransfers relies on it):
+// reject self-loops and any edge that would close a cycle at the command boundary, so
+// the solver never faces circulating flow. The proposed edge plus every existing
+// transfer edge must still topologically sort.
+function assertTransfersAcyclic(state: SimState, srcId: Id, dstId: Id, kind: string): void {
+  const edges: [Id, Id][] = [[srcId, dstId]];
+  forEachRoute(state, (_id, route) => edges.push([route.srcId, route.dstId]));
+  forEachConverter(state, (_id, converter) => edges.push([converter.srcId, converter.dstId]));
+  if (topoSort(warehouseIds(state), edges) === null) {
+    throw new Error(`${kind} ${srcId}->${dstId} would create a cycle`);
+  }
+}
+
 export function addRoute(state: SimState, t: number, srcId: Id, dstId: Id, cap: number): Id {
   if (srcId === dstId) {
     throw new Error(`route source and destination must differ, got ${srcId}`);
@@ -696,11 +777,7 @@ export function addRoute(state: SimState, t: number, srcId: Id, dstId: Id, cap: 
       `route resource mismatch: source stores ${src.resource}, destination stores ${dst.resource}`,
     );
   }
-  const edges: [Id, Id][] = [[srcId, dstId]];
-  forEachRoute(state, (_id, route) => edges.push([route.srcId, route.dstId]));
-  if (topoSort(warehouseIds(state), edges) === null) {
-    throw new Error(`route ${srcId}->${dstId} would create a cycle`);
-  }
+  assertTransfersAcyclic(state, srcId, dstId, "route");
   advance(state, t);
   const id = allocId(state);
   setRoute(state, id, createRoute(srcId, dstId, cap));
@@ -714,4 +791,39 @@ export function setRouteCap(state: SimState, t: number, id: Id, cap: number): vo
   advance(state, t);
   route.cap = cap;
   deriveAll(state);
+}
+
+// Refinement command: wire a converter that consumes the source's resource and produces
+// the destination's. The endpoint resources must DIFFER — a same-type "converter" would
+// be a lossy/gainy route bypassing route conservation (DESIGN.md: changing type is
+// refinement's job, never a route's). Same validate -> advance -> mutate -> deriveAll
+// shape as addRoute; rides the same combined transfer DAG.
+export function addConverter(
+  state: SimState,
+  t: number,
+  srcId: Id,
+  dstId: Id,
+  cap: number,
+  ratio: number,
+): Id {
+  if (srcId === dstId) {
+    throw new Error(`converter source and destination must differ, got ${srcId}`);
+  }
+  checkCap(cap);
+  if (!Number.isFinite(ratio) || !(ratio > 0)) {
+    throw new Error(`converter ratio must be finite and > 0, got ${ratio}`);
+  }
+  const src = getWarehouse(state, srcId); // validates the source exists
+  const dst = getWarehouse(state, dstId); // validates the destination exists
+  if (src.resource === dst.resource) {
+    throw new Error(
+      `converter source and destination resources must differ, both store ${src.resource}`,
+    );
+  }
+  assertTransfersAcyclic(state, srcId, dstId, "converter");
+  advance(state, t);
+  const id = allocId(state);
+  setConverter(state, id, createConverter(srcId, dstId, cap, ratio));
+  deriveAll(state);
+  return id;
 }

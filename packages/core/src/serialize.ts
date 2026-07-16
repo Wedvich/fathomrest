@@ -1,3 +1,4 @@
+import type { Converter } from "./components/converter.ts";
 import type { Deposit, DepositTier } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import type { Route } from "./components/route.ts";
@@ -21,7 +22,7 @@ import type { SimState } from "./state.ts";
 // entry arrays, events as a sorted list. One codec for export, import, and future cloud
 // sync — the schema never forks.
 
-const SAVE_VERSION = 2;
+const SAVE_VERSION = 3;
 
 export type TableEntries<T> = [Id, T][];
 
@@ -36,6 +37,7 @@ export interface SaveDocument {
   warehouses: TableEntries<Warehouse>;
   deposits: TableEntries<Deposit>;
   routes: TableEntries<Route>;
+  converters: TableEntries<Converter>;
 }
 
 // Tables and events are copied in both directions so a save document never aliases
@@ -90,6 +92,7 @@ export function serializeState(state: SimState): SaveDocument {
     warehouses: tableToEntries(state.warehouses),
     deposits: tableToEntries(state.deposits, copyDeposit),
     routes: tableToEntries(state.routes),
+    converters: tableToEntries(state.converters),
   };
 }
 
@@ -160,19 +163,23 @@ function checkTable<T extends object>(
   return ids;
 }
 
-// The solver requires an acyclic route graph. Reuse the same iterative Kahn sort the
-// solver and command boundary use (graph.ts) — no recursion, so a deep hand-edited chain
-// can't overflow the stack. A null result means the edges contain a cycle.
-function checkRoutesAcyclic(routes: TableEntries<Route>): void {
+// The solver requires an acyclic transfer graph (routes ∪ converters — one combined
+// DAG). Reuse the same iterative Kahn sort the solver and command boundary use
+// (graph.ts) — no recursion, so a deep hand-edited chain can't overflow the stack. A
+// null result means the edges contain a cycle.
+function checkTransfersAcyclic(
+  routes: TableEntries<Route>,
+  converters: TableEntries<Converter>,
+): void {
   const nodes = new Set<Id>();
   const edges: [Id, Id][] = [];
-  for (const [, route] of routes) {
-    nodes.add(route.srcId);
-    nodes.add(route.dstId);
-    edges.push([route.srcId, route.dstId]);
+  for (const [, edge] of [...routes, ...converters]) {
+    nodes.add(edge.srcId);
+    nodes.add(edge.dstId);
+    edges.push([edge.srcId, edge.dstId]);
   }
   if (topoSort([...nodes], edges) === null) {
-    throw invalid("routes form a cycle");
+    throw invalid("transfers (routes + converters) form a cycle");
   }
 }
 
@@ -274,9 +281,30 @@ function validateDocument(doc: SaveDocument): void {
     checkNonNegative(route.cap, `${at}.cap`);
     checkNonNegative(route.flow, `${at}.flow`);
   });
-  // The solver's convergence bound rests on an acyclic route graph; a hand-edited save
-  // with a cycle would otherwise throw deep inside a later advance(). Reject it here.
-  checkRoutesAcyclic(doc.routes);
+  checkTable(doc.converters, "converters", (converter, at) => {
+    checkFinite(converter.srcId, `${at}.srcId`);
+    if (!warehouseIds.has(converter.srcId)) {
+      throw invalid(`${at}.srcId ${converter.srcId} has no warehouse`);
+    }
+    checkFinite(converter.dstId, `${at}.dstId`);
+    if (!warehouseIds.has(converter.dstId)) {
+      throw invalid(`${at}.dstId ${converter.dstId} has no warehouse`);
+    }
+    if (converter.srcId === converter.dstId) {
+      throw invalid(`${at} source and destination must differ`);
+    }
+    // Mirror addConverter's type invariant: refinement changes type, so a same-type
+    // converter is a lossy/gainy route in disguise (DESIGN.md economy).
+    if (warehouseResource.get(converter.srcId) === warehouseResource.get(converter.dstId)) {
+      throw invalid(`${at} source and destination resources must differ`);
+    }
+    checkNonNegative(converter.cap, `${at}.cap`);
+    checkPositive(converter.ratio, `${at}.ratio`);
+    checkNonNegative(converter.flow, `${at}.flow`);
+  });
+  // The solver's convergence bound rests on an acyclic transfer graph; a hand-edited
+  // save with a cycle would otherwise throw deep inside a later advance(). Reject it here.
+  checkTransfersAcyclic(doc.routes, doc.converters);
   if (!Array.isArray(doc.events)) {
     throw invalid("events must be an array");
   }
@@ -301,25 +329,30 @@ function validateDocument(doc: SaveDocument): void {
   }
 }
 
-// Forward-migrate an older save document to the current schema. Pre-release saves without a
-// safe upgrade are discarded (ADR-0001 §8), but a new field with a sensible default is worth
-// migrating so idle progress survives the bump. v1 predates the warehouse islandId
-// (island.ts): backfill the default grouping onto every warehouse, then let validateDocument
-// vet the upgraded document exactly as it would a native one.
+// Forward-migrate an older save document to the current schema, one version step at a
+// time. Pre-release saves without a safe upgrade are discarded (ADR-0001 §8), but a new
+// field with a sensible default is worth migrating so idle progress survives the bump.
+// v1 predates the warehouse islandId (island.ts): backfill the default grouping. v2
+// predates converters: backfill an empty table. validateDocument then vets the upgraded
+// document exactly as it would a native one.
 const MIGRATION_DEFAULT_ISLAND = islandId("island-1");
 
 function migrateDocument(doc: SaveDocument): SaveDocument {
-  if (doc.version === 1 && Array.isArray(doc.warehouses)) {
-    return {
-      ...doc,
-      version: SAVE_VERSION,
-      warehouses: doc.warehouses.map(([id, warehouse]): [Id, Warehouse] => [
+  let migrated = doc;
+  if (migrated.version === 1 && Array.isArray(migrated.warehouses)) {
+    migrated = {
+      ...migrated,
+      version: 2,
+      warehouses: migrated.warehouses.map(([id, warehouse]): [Id, Warehouse] => [
         id,
         { ...warehouse, islandId: MIGRATION_DEFAULT_ISLAND },
       ]),
     };
   }
-  return doc;
+  if (migrated.version === 2) {
+    migrated = { ...migrated, version: 3, converters: [] };
+  }
+  return migrated;
 }
 
 export function deserializeState(doc: SaveDocument): SimState {
@@ -345,5 +378,6 @@ export function deserializeState(doc: SaveDocument): SimState {
     warehouses: entriesToTable(migrated.warehouses),
     deposits: entriesToTable(migrated.deposits, copyDeposit),
     routes: entriesToTable(migrated.routes),
+    converters: entriesToTable(migrated.converters),
   };
 }

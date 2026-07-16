@@ -14,6 +14,12 @@ export { offlineElapsedSeconds } from "./clock.ts";
 export type { EventKind, EventQueue, SimEvent } from "./events.ts";
 export { createSimState, type SimState } from "./state.ts";
 export {
+  converterIds,
+  forEachConverter,
+  getConverter,
+  type Converter,
+} from "./components/converter.ts";
+export {
   depositIds,
   forEachDeposit,
   getDeposit,
@@ -35,12 +41,15 @@ export {
   type WarehouseRegime,
 } from "./components/warehouse.ts";
 export {
+  addConverter,
   addDeposit,
   addExtractor,
   addRoute,
   addWarehouse,
   advance,
   buildExtractor,
+  converterDraw,
+  converterFeed,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,

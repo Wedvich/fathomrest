@@ -55,6 +55,13 @@ extract, refine, research, and sail out to discover new islands.
   solver "stays per-type" for free. Typed inventories are the prerequisite for refinement
   (raw → refined) and resource-costed building. The type tag is opaque to the core
   (`ResourceType`, a branded string); the resource set is authored content in the app.
+- **Refinement is a single-input converter** (`sim.ts: addConverter`): consume resource A
+  from a source warehouse at up to a player-set `cap` (A/sec), produce `ratio · A` of
+  resource B into a destination warehouse of a **different** type — same-type converters
+  are rejected (that would be a lossy/gainy route). To the solver a converter is a
+  ratio-scaled transfer edge riding the same combined DAG and fixed point as routes
+  (ADR-0001 §route solver). Multi-input (Leontief) recipes — `iron + coal → steel` — are
+  deferred to a future ADR-first effort; they escalate edges to fixed-proportion nodes.
 - **Warehouses carry an opaque island tag** (`IslandId`, a branded string like
   `ResourceType`). A **resource-costed build** debits only stock on the build site's
   island, spread proportionally across that island's warehouses of each cost resource —

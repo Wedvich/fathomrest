@@ -5,12 +5,15 @@ import { islandId } from "./island.ts";
 import { resourceType } from "./resource.ts";
 import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
+  addConverter,
   addDeposit,
   addExtractor,
   addRoute,
   addWarehouse,
   advance,
   buildExtractor,
+  converterDraw,
+  converterFeed,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
@@ -296,6 +299,94 @@ describe("routes", () => {
   });
 });
 
+describe("converters", () => {
+  const ore = resourceType("ore");
+  const ingot = resourceType("ingot");
+
+  // Ample ore supply feeding a converter into an ingot warehouse; scenarios adjust
+  // pulls to force each regime.
+  function refinery(): {
+    state: SimState;
+    source: ReturnType<typeof addWarehouse>;
+    dest: ReturnType<typeof addWarehouse>;
+    converter: ReturnType<typeof addConverter>;
+  } {
+    const state = createSimState(42, 0);
+    const source = addWarehouse(state, 0, ore, I, 1_000);
+    const dest = addWarehouse(state, 0, ingot, I, 100);
+    const deposit = addDeposit(state, 0, ore, [], 1);
+    addExtractor(state, 0, 5, deposit, source);
+    const converter = addConverter(state, 0, source, dest, 4, 0.5);
+    return { state, source, dest, converter };
+  }
+
+  it("draws at cap and produces at draw · ratio when unconstrained", () => {
+    const { state, source, dest, converter } = refinery();
+    expect(converterDraw(state, converter)).toBe(4); // cap-limited below the 5/s supply
+    expect(converterFeed(state, converter)).toBe(2);
+    // Source keeps 5 - 4 = 1 ore/s; dest gains 2 ingots/s.
+    expect(warehouseAmountAt(state, source, 10)).toBe(10);
+    expect(warehouseAmountAt(state, dest, 10)).toBe(20);
+    advance(state, 10);
+    expect(converterDraw(state, converter)).toBe(4);
+  });
+
+  it("throttles the draw in source units when the destination jams", () => {
+    const { state, source, dest, converter } = refinery();
+    setWarehousePullRate(state, 0, dest, 1); // ingots leave slower than the 2/s feed
+    advance(state, 200); // dest nets +1/s and pins full at t=100
+    expect(getWarehouse(state, dest).regime).toBe("pinned-full");
+    // Acceptance is 1 ingot/s, so the draw backs off to 1 / ratio = 2 ore/s.
+    expect(converterFeed(state, converter)).toBe(1);
+    expect(converterDraw(state, converter)).toBe(2);
+    // Backpressure lands in the source's own units: it now keeps 5 - 2 = 3 ore/s.
+    expect(warehouseAmountAt(state, source, 200)).toBe(400);
+  });
+
+  it("water-fills a starved source between a route and a converter", () => {
+    const state = createSimState(42, 0);
+    const source = addWarehouse(state, 0, ore, I, 100);
+    const oreDest = addWarehouse(state, 0, ore, I, 1_000);
+    const ingotDest = addWarehouse(state, 0, ingot, I, 1_000);
+    const deposit = addDeposit(state, 0, ore, [], 1);
+    addExtractor(state, 0, 3, deposit, source); // trickle below the combined demand of 6
+    const route = addRoute(state, 0, source, oreDest, 4);
+    const converter = addConverter(state, 0, source, ingotDest, 2, 0.5);
+    advance(state, 100);
+    expect(getWarehouse(state, source).regime).toBe("pinned-empty");
+    // Water level 3/6: each consumer gets half its desire, in its own source units.
+    expect(routeFlow(state, route)).toBe(2);
+    expect(converterDraw(state, converter)).toBe(1);
+    expect(converterFeed(state, converter)).toBe(0.5);
+  });
+
+  it("rejects a cross-type cycle over the combined transfer graph", () => {
+    const state = createSimState(42, 0);
+    const oreA = addWarehouse(state, 0, ore, I, 100);
+    const ingotB = addWarehouse(state, 0, ingot, I, 100);
+    const oreC = addWarehouse(state, 0, ore, I, 100);
+    addConverter(state, 0, oreA, ingotB, 2, 0.5);
+    addConverter(state, 0, ingotB, oreC, 2, 1);
+    // Closing the loop with either edge kind is rejected before any mutation.
+    expect(() => addRoute(state, 0, oreC, oreA, 5)).toThrow(/cycle/);
+    expect(() => addConverter(state, 0, ingotB, oreA, 1, 1)).toThrow(/cycle/);
+  });
+
+  it("rejects same-type endpoints, self-loops, and bad caps/ratios at the boundary", () => {
+    const state = createSimState(42, 0);
+    const a = addWarehouse(state, 0, ore, I, 100);
+    const b = addWarehouse(state, 0, ore, I, 100);
+    const c = addWarehouse(state, 0, ingot, I, 100);
+    expect(() => addConverter(state, 0, a, b, 2, 0.5)).toThrow(/must differ/);
+    expect(() => addConverter(state, 0, a, a, 2, 0.5)).toThrow(/must differ/);
+    expect(() => addConverter(state, 0, a, c, -1, 0.5)).toThrow(/cap/);
+    expect(() => addConverter(state, 0, a, c, Number.NaN, 0.5)).toThrow(/cap/);
+    expect(() => addConverter(state, 0, a, c, 2, 0)).toThrow(/ratio/);
+    expect(() => addConverter(state, 0, a, c, 2, -2)).toThrow(/ratio/);
+    expect(() => addConverter(state, 0, a, c, 2, Number.POSITIVE_INFINITY)).toThrow(/ratio/);
+  });
+});
+
 describe("resource typing", () => {
   it("rejects an extractor whose deposit and warehouse types differ", () => {
     const state = createSimState(42, 0);
@@ -435,20 +526,24 @@ describe("determinism", () => {
     expect(runScenario(3_333)).toStrictEqual(single);
   });
 
-  // A route network (fan-out A->B, A->C plus chain B->C) with regime flips and a route
-  // re-cap over the span. The solver runs at every event/command epoch, so a coupled
-  // graph must still replay bit-identically across advance granularities.
+  // A transfer network (fan-out A->B, A->C, chain B->C, and a converter tail C->refined)
+  // with regime flips and a route re-cap over the span. The solver runs at every
+  // event/command epoch, so a coupled graph must still replay bit-identically across
+  // advance granularities.
   function runRouteScenario(stepCount: number): SaveDocument {
     const state = createSimState(13, 0);
     const a = addWarehouse(state, 0, R, I, 400);
     const b = addWarehouse(state, 0, R, I, 300);
     const c = addWarehouse(state, 0, R, I, 500);
+    const refined = addWarehouse(state, 0, resourceType("refined"), I, 250);
     const deposit = addDeposit(state, 0, R, [{ amount: 50_000, multiplier: 2 }], 0.5);
     addExtractor(state, 0, 4, deposit, a);
     const ab = addRoute(state, 0, a, b, 3);
     addRoute(state, 0, a, c, 2); // fan-out from A
     addRoute(state, 0, b, c, 2); // and a chain into C
+    addConverter(state, 0, c, refined, 1.5, 0.5); // refinement tail off C (cross-type)
     setWarehousePullRate(state, 0, c, 1);
+    setWarehousePullRate(state, 0, refined, 0.25);
     const commands: readonly (readonly [number, () => void])[] = [
       [30_000, (): void => setWarehousePullRate(state, 30_000, c, 6)], // open C's sink
       [80_000, (): void => setRouteCap(state, 80_000, ab, 8)], // widen A->B
@@ -471,7 +566,7 @@ describe("determinism", () => {
     return serializeState(state);
   }
 
-  it("replays a coupled route network bit-identically across advance granularities", () => {
+  it("replays a coupled transfer network bit-identically across advance granularities", () => {
     const single = runRouteScenario(1);
     expect(runRouteScenario(10_000)).toStrictEqual(single);
     expect(runRouteScenario(3_333)).toStrictEqual(single);

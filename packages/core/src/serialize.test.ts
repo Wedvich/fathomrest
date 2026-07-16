@@ -15,11 +15,14 @@ import {
   type SaveDocument,
 } from "./serialize.ts";
 import {
+  addConverter,
   addDeposit,
   addExtractor,
   addRoute,
   addWarehouse,
   advance,
+  converterDraw,
+  converterFeed,
   routeFlow,
   setWarehousePullRate,
   warehouseAmountAt,
@@ -294,6 +297,92 @@ describe("serializer", () => {
         : [id, warehouse],
     );
     expect(() => deserializeState({ ...doc, warehouses })).toThrow(/resources must match/);
+  });
+
+  function converterState(): {
+    state: SimState;
+    converter: ReturnType<typeof addConverter>;
+  } {
+    const state = createSimState(5, 0);
+    const source = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, resourceType("refined"), I, 100);
+    const deposit = addDeposit(state, 0, R, [], 1);
+    addExtractor(state, 0, 5, deposit, source);
+    const converter = addConverter(state, 0, source, dest, 4, 0.5);
+    advance(state, 10);
+    return { state, converter };
+  }
+
+  it("round-trips a converter and re-derives identical draw and feed", () => {
+    const { state, converter } = converterState();
+    const restored = deserializeState(serializeState(state));
+    expect(converterDraw(restored, converter)).toBe(converterDraw(state, converter));
+    expect(converterFeed(restored, converter)).toBe(converterFeed(state, converter));
+    expect(serializeState(restored)).toStrictEqual(serializeState(state));
+  });
+
+  it("rejects converter documents violating the import invariants", () => {
+    const doc = serializeState(converterState().state);
+    const patched = (patch: object): SaveDocument => ({
+      ...doc,
+      converters: doc.converters.map(([id, converter]): (typeof doc.converters)[number] => [
+        id,
+        { ...converter, ...patch },
+      ]),
+    });
+    expect(() => deserializeState(patched({ ratio: 0 }))).toThrow(/ratio/);
+    expect(() => deserializeState(patched({ ratio: -1 }))).toThrow(/ratio/);
+    expect(() => deserializeState(patched({ cap: -1 }))).toThrow(/cap/);
+    expect(() => deserializeState(patched({ srcId: idFromNumber(999) }))).toThrow(/srcId/);
+    expect(() => deserializeState(patched({ dstId: idFromNumber(999) }))).toThrow(/dstId/);
+  });
+
+  it("rejects a converter whose endpoints share an id or a resource", () => {
+    const doc = serializeState(converterState().state);
+    const [entry] = doc.converters;
+    if (entry === undefined) {
+      throw new Error("converterState should produce one converter");
+    }
+    const [, converter] = entry;
+    const selfLoop = doc.converters.map(([id, c]): (typeof doc.converters)[number] => [
+      id,
+      { ...c, dstId: c.srcId },
+    ]);
+    expect(() => deserializeState({ ...doc, converters: selfLoop })).toThrow(/differ/);
+    // Retype the destination to match the source: refinement must change type.
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] =>
+      id === converter.dstId ? [id, { ...warehouse, resource: R }] : [id, warehouse],
+    );
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/resources must differ/);
+  });
+
+  it("rejects a combined route+converter cycle on import", () => {
+    const state = createSimState(5, 0);
+    const a = addWarehouse(state, 0, R, I, 100);
+    const b = addWarehouse(state, 0, R, I, 100);
+    const c = addWarehouse(state, 0, resourceType("refined"), I, 100);
+    addRoute(state, 0, a, b, 3);
+    addConverter(state, 0, b, c, 2, 0.5);
+    const doc = serializeState(state);
+    // Hand-add a converter closing the loop: route A->B, converter B->C, converter C->A.
+    const closing: (typeof doc.converters)[number] = [
+      idFromNumber(500),
+      { srcId: c, dstId: a, cap: 1, ratio: 2, flow: 0 },
+    ];
+    expect(() => deserializeState({ ...doc, converters: [...doc.converters, closing] })).toThrow(
+      /cycle/,
+    );
+  });
+
+  it("migrates a v2 save by backfilling an empty converter table, preserving idle progress", () => {
+    const { state } = midFlightState();
+    const doc = serializeState(state);
+    const { converters: _omit, ...rest } = doc;
+    const v2 = { ...rest, version: 2 } as SaveDocument;
+    const restored = deserializeState(v2);
+    advance(restored, 1_000);
+    advance(state, 1_000);
+    expect(serializeState(restored)).toStrictEqual(serializeState(state));
   });
 
   it("rejects a structurally truncated document", () => {

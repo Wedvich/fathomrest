@@ -1,4 +1,5 @@
 import {
+  addConverter,
   addDeposit,
   addExtractor,
   buildExtractor as buildExtractorCmd,
@@ -50,11 +51,12 @@ export interface SavedWorld {
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const state = createSimState(seed, wallTimeMs);
 
-  // Two resource types exercise typing end-to-end: the ore chain (Pier -> Depot route)
-  // stays ore; the Quarry build site is stone. A route or extractor crossing types is
-  // rejected by the core (sim.ts).
+  // Three resource types exercise typing end-to-end: the ore chain (Pier -> Depot route)
+  // stays ore; the Quarry build site is stone; the Foundry holds ingots refined from the
+  // Depot's ore. A route or extractor crossing types is rejected by the core (sim.ts).
   const ore = resourceType("ore");
   const stone = resourceType("stone");
+  const ingot = resourceType("ingot");
   // Single starting island: all three warehouses share it, so a build here can spend ore
   // shipped in from the Pier/Depot but never stock parked on another island.
   const home = islandId("home");
@@ -76,12 +78,18 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   setWarehousePullRate(state, 0, pierWarehouse, 3);
   addRoute(state, 0, pierWarehouse, depotWarehouse, 4);
 
+  // Refinement slice: a converter smelts the Depot's ore into Foundry ingots — draws up
+  // to 2 ore/s, produces 1 ingot/s (ratio 0.5).
+  const foundryWarehouse = addWarehouse(state, 0, ingot, home, 100);
+  addConverter(state, 0, depotWarehouse, foundryWarehouse, 2, 0.5);
+
   return {
     state,
     warehouses: [
       { id: pierWarehouse, label: "Pier" },
       { id: depotWarehouse, label: "Depot" },
       { id: quarryWarehouse, label: "Quarry" },
+      { id: foundryWarehouse, label: "Foundry" },
     ],
     deposits: [
       { id: oreDeposit, label: "Ore vein" },

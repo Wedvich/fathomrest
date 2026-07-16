@@ -1,3 +1,4 @@
+import type { Converter } from "./components/converter.ts";
 import type { Deposit } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import type { Route } from "./components/route.ts";
@@ -23,6 +24,7 @@ export interface SimState {
   warehouses: Map<Id, Warehouse>;
   deposits: Map<Id, Deposit>;
   routes: Map<Id, Route>;
+  converters: Map<Id, Converter>;
 }
 
 export function createSimState(seed: number, wallTimeMs: number): SimState {
@@ -36,6 +38,7 @@ export function createSimState(seed: number, wallTimeMs: number): SimState {
     warehouses: new Map(),
     deposits: new Map(),
     routes: new Map(),
+    converters: new Map(),
   };
 }
 
