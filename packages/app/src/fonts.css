@@ -15,9 +15,31 @@
   font-family: "Coming Soon", monospace;
 }
 
-/* Bleached-parchment page background so the DOM UI matches the Pixi canvas
-   (PixiReadout uses the same 0xf1e9d2). */
+/* Dark page background so the DOM UI matches the Pixi canvas
+   (PixiReadout uses the same 0x0e1a24). Light text keeps h1/p legible. */
 body {
   margin: 0;
-  background: #f1e9d2;
+  background: #0e1a24;
+  color: #cfe6f2;
+}
+
+/* Simple flat buttons that sit on the dark canvas: a slightly lighter panel
+   fill with a muted blue border, matching the Pixi readout palette. */
+button {
+  font: inherit;
+  color: #cfe6f2;
+  background: #14303f;
+  border: 1px solid #2b4a5c;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #1c3e50;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }

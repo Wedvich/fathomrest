@@ -175,7 +175,7 @@ export function PixiReadout(): React.JSX.Element {
       await app.init({
         width: WIDTH,
         height: PADDING * 2 + ROW_HEIGHT * (world.warehouses.length + world.deposits.length),
-        background: 0xf1e9d2,
+        background: 0x0e1a24,
         antialias: true,
         resolution: window.devicePixelRatio,
         autoDensity: true,
@@ -207,16 +207,16 @@ export function PixiReadout(): React.JSX.Element {
         row.y = PADDING + index * ROW_HEIGHT;
         const labelText = new Text({
           text: label,
-          style: { fill: 0x4a3b26, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
+          style: { fill: 0xcfe6f2, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
         });
         const readout = new Text({
           text: "",
-          style: { fill: 0x7a6a4d, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
+          style: { fill: 0x8fb2c4, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
         });
         // Right-align to the bar's right edge; label stays left-aligned at x=0.
         readout.anchor.set(1, 0);
         readout.x = barWidth;
-        const track = new Graphics().roundRect(0, 0, barWidth, BAR_HEIGHT, 4).fill(0xdccda8);
+        const track = new Graphics().roundRect(0, 0, barWidth, BAR_HEIGHT, 4).fill(0x14303f);
         track.y = 24;
         // Plain rect Sprite, not Graphics: width is set every tick to reflect frac, and a
         // Sprite resize is a cheap transform (no geometry rebuild/GPU re-upload) vs. Graphics'
