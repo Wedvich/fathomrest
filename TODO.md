@@ -6,43 +6,44 @@ pick up next".
 
 ## Done last session
 
-**Refinement — the single-input converter (A → B).** The first refinement tier from the
-vertical slice is in: a `Converter` consumes resource A from one warehouse and produces
-B = `ratio · A` into another, riding the existing flow solver as a ratio-scaled transfer
-edge.
+**World content upgrades in `restoreWorld`.** Restored saves now receive new _content_
+(not just state migrations) without a reset. All in `packages/app/src/sim/world.ts`.
 
-- New `packages/core/src/components/converter.ts`: `Converter { srcId, dstId, cap,
-ratio, flow }` — `cap` is the player-set max draw (A-units/sec), `ratio` (> 0) the B
-  produced per A consumed, `flow` the cached realized draw (feed = `flow · ratio`).
-  Table accessors mirror `route.ts`; `converters` table added to `SimState`.
-- **Solver generalized:** `solveRoutes` → `solveTransfers` over transfer edges =
-  routes ∪ converters (routes first, then converters, both table order). Edge allowances
-  (`srcCap`/`dstCap`) stay in **source units** for every edge; `ratio` applies only at
-  the destination-side water-fill (multiply in, divide out). Routes are the `ratio = 1`
-  special case — bit-identical to the old solver (all 66 pre-existing tests pass
-  untouched). Convergence proof unchanged; combined graph is one DAG (ADR-0001 §route
-  solver updated).
-- **Command** `addConverter(state, t, srcId, dstId, cap, ratio)`: rejects self-loops,
-  non-finite/non-positive ratio, bad cap, **same-resource endpoints** (refinement must
-  change type — a same-type converter would be a lossy/gainy route), and any cycle over
-  the combined route+converter graph (`assertTransfersAcyclic`, shared with `addRoute`).
-  Queries: `converterDraw` (A-units) / `converterFeed` (B-units).
-- **Serialization:** `SAVE_VERSION` 2 → 3; `converters` table in `SaveDocument`; import
-  validation mirrors every command invariant (dangling ids, self-loop, same-resource,
-  ratio > 0, combined-graph acyclicity via `checkTransfersAcyclic`). `migrateDocument`
-  now chains v1 → v2 (island backfill) → v3 (empty converter table), preserving idle
-  progress.
-- **App demo world:** Depot (ore) → converter (2 ore/s, ratio 0.5) → Foundry (ingot,
-  new warehouse row in the Pixi readout).
-- **Tests:** converter scenarios in `sim.test.ts` (cap+ratio happy path, backpressure
-  throttling in source units, water-fill split of a starved source between a route and a
-  converter, cross-type cycle rejection, boundary validation); serialize round-trip,
-  import rejections, combined-cycle rejection, v2→v3 migration; the route determinism
-  scenario now includes a converter tail and still replays bit-identically.
+- `SavedWorld` gains optional `contentVersion` (absent → treated as `1`); `DemoWorld`
+  carries it and `snapshotWorld` stamps it — `max(saved, WORLD_CONTENT_VERSION)` on
+  restore, so a stale service-worker-pinned bundle can never downgrade a newer save's
+  version and trick the updated app into re-running steps.
+- Upgrade framework: `WORLD_UPGRADES` is an ordered list of
+  `(world, t) => DemoWorld` steps expressed through the **normal core command surface**
+  (so typing/DAG/determinism invariants are enforced by the commands). `WORLD_CONTENT_VERSION`
+  is derived from the list length — adding a step bumps the version by construction.
+- `restoreWorld` runs the steps **after** offline catch-up, threading the world through
+  each step at `t = state.epoch`, so backfilled structures are wired at the restore-time
+  epoch and never retroactively produce across the offline gap.
+- First step `upgradeV1AddFoundry` (v1 → v2): backfills the ingot Foundry warehouse + the
+  Depot→Foundry converter (mirrors `createDemoWorld`) and appends the `Foundry` label.
+  Idempotent: no-ops when a `Foundry` label already exists (saves from 82bdbc0 itself
+  predate the version stamp but already carry the content). A missing `Depot` label skips
+  converter wiring but still advances the version.
+- Hardened after adversarial review: `contentVersion` is validated at the restore
+  boundary (non-integer or < 1 throws into the existing quarantine path — no busy-loop,
+  no silent step-skipping); each step runs in try/catch, so a failing command logs and
+  degrades to missing content instead of quarantining (= resetting) a working save.
+- Persistence unchanged: save-on-command/interval in `PixiReadout` re-stamps the upgraded
+  envelope (now carrying the new `contentVersion`) shortly after boot; the epoch
+  write-guard is satisfied since upgrade commands only advance epoch forward.
+- Tests (`world.test.ts`): pre-refinement save upgrades on restore (Foundry appears,
+  converter produces, re-snapshot stamps current version), idempotence across a
+  restore→snapshot→restore round-trip, a current-version save left untouched, no
+  duplication on a version-stamp-less 82bdbc0 save, corrupt `contentVersion` rejection,
+  newer-version preservation, and a failing step degrading instead of throwing.
 
-`typecheck | lint | format | test` green (76 tests), production build clean.
+`typecheck | lint | format | test` green (83 tests), production build clean.
 
-The handoff doc `HANDOFF-refinement-converter.md` (untracked, in the main checkout root)
+**Every future demo-world content change must ship with a new `WORLD_UPGRADES` step**
+(and the version bump follows for free from the list length).
+
+The handoff doc `HANDOFF-world-content-upgrade.md` (untracked, in the main checkout root)
 is implemented by this session — **delete it once this branch lands on `main`**.
 
 ## Next session

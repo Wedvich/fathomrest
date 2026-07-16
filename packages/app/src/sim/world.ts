@@ -28,6 +28,11 @@ export interface DemoWorld {
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly { id: Id; label: string }[];
   buildSite: BuildSite;
+  // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or
+  // an upgraded restore, higher when a newer app wrote the loaded save. snapshotWorld
+  // stamps this (never a lower constant), so a stale service-worker-pinned bundle can't
+  // downgrade a newer save's version and trick it into re-running upgrade steps.
+  contentVersion: number;
 }
 
 // The unworked deposit + its idle warehouse the player builds an extractor onto (the
@@ -46,6 +51,10 @@ export interface SavedWorld {
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly { id: Id; label: string }[];
   buildSite: BuildSite;
+  // App content revision this envelope was written at. Absent on a pre-versioning save
+  // (treated as 1). Bumped whenever a WORLD_UPGRADES step is added, so restoreWorld can
+  // raise older saves to current.
+  contentVersion?: number;
 }
 
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
@@ -96,6 +105,40 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
       { id: graniteDeposit, label: "Granite vein" },
     ],
     buildSite: { depositId: graniteDeposit, warehouseId: quarryWarehouse },
+    contentVersion: WORLD_CONTENT_VERSION,
+  };
+}
+
+// Content upgrades: each step raises a restored world from content version index+1 to
+// index+2 using core commands at the current epoch, and appends any new envelope view
+// models (warehouse/deposit labels the core doesn't carry). restoreWorld gates them by
+// contentVersion, so a step normally runs once — but saves written by the very commit
+// that introduced a step's content predate the version stamp, so every step must also
+// be idempotent: skip when its content is already present. WORLD_CONTENT_VERSION is
+// derived from the list — adding a step bumps the version by construction.
+// createDemoWorld builds at the current version already.
+const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = [
+  upgradeV1AddFoundry,
+];
+export const WORLD_CONTENT_VERSION = WORLD_UPGRADES.length + 1;
+
+// v1 -> v2: backfill the refinement slice (commit 82bdbc0) onto pre-refinement saves —
+// an ingot Foundry warehouse fed by a converter smelting the Depot's ore, mirroring
+// createDemoWorld. If the Depot label is missing (hand-edited save) the converter wiring
+// is skipped but the version still advances: a cosmetic content gap must never throw the
+// restore into the quarantine path.
+function upgradeV1AddFoundry(world: DemoWorld, t: number): DemoWorld {
+  // A save written by the refinement commit itself (pre-versioning) already carries the
+  // Foundry — re-running the step must not duplicate it.
+  if (world.warehouses.some((w) => w.label === "Foundry")) return world;
+  const foundry = addWarehouse(world.state, t, resourceType("ingot"), islandId("home"), 100);
+  const depot = world.warehouses.find((w) => w.label === "Depot");
+  if (depot !== undefined) {
+    addConverter(world.state, t, depot.id, foundry, 2, 0.5);
+  }
+  return {
+    ...world,
+    warehouses: [...world.warehouses, { id: foundry, label: "Foundry" }],
   };
 }
 
@@ -105,6 +148,7 @@ export function snapshotWorld(world: DemoWorld): SavedWorld {
     warehouses: world.warehouses,
     deposits: world.deposits,
     buildSite: world.buildSite,
+    contentVersion: world.contentVersion,
   };
 }
 
@@ -152,12 +196,36 @@ export function buildExtractor(world: DemoWorld, t: number): boolean {
 // (offline catch-up, ADR-0001 §4). The saved (epoch, wallTime) pair stays a valid anchor
 // afterward — the next save re-stamps wallTime — so wallTime is left as-is here.
 export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
+  // contentVersion crosses an untrusted boundary (IndexedDB today, export/import later).
+  // A malformed value must fail loud into the caller's quarantine path — a negative
+  // number would otherwise walk the whole numeric range, a fractional one silently skip
+  // steps and then get stamped current, losing the content forever.
+  const savedVersion = saved.contentVersion ?? 1; // absent: save predates versioning
+  if (!Number.isSafeInteger(savedVersion) || savedVersion < 1) {
+    throw new Error(`invalid save contentVersion: ${String(saved.contentVersion)}`);
+  }
   const state = deserializeState(saved.doc);
   advance(state, state.epoch + offlineElapsedSeconds(nowMs, state.wallTime));
-  return {
+  let world: DemoWorld = {
     state,
     warehouses: saved.warehouses,
     deposits: saved.deposits,
     buildSite: saved.buildSite,
+    // max: a save from a newer app keeps its higher version, so re-saving on this stale
+    // bundle never downgrades it into re-running the newer app's steps later.
+    contentVersion: Math.max(savedVersion, WORLD_CONTENT_VERSION),
   };
+  // Content upgrades run after offline catch-up (design decision 3): new structures are
+  // wired at the restore-time epoch via commands, so they never retroactively produce
+  // across the offline gap. A save at (or past) the current version runs no steps. A
+  // failing step logs and degrades to missing content — a content gap is recoverable,
+  // quarantining (= resetting) a working save is not.
+  for (const step of WORLD_UPGRADES.slice(savedVersion - 1)) {
+    try {
+      world = step(world, world.state.epoch);
+    } catch (error) {
+      console.warn("World content upgrade step failed; skipping it.", error);
+    }
+  }
+  return world;
 }

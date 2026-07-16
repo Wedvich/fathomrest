@@ -107,6 +107,17 @@ extract, refine, research, and sail out to discover new islands.
   No reduced offline rates, no time banking.
 - **Local-first persistence**: one serializable save document in IndexedDB with
   export/import. Schema designed so optional cloud sync can bolt on later.
+- **State migrations vs. content upgrades are separate concerns**: core `migrateDocument`
+  preserves _state_ only (schema-shape bumps, content-agnostic). Injecting new _content_
+  into existing saves (new buildings, demo-world changes) is an app concern — a versioned
+  `restoreWorld` (`packages/app/src/sim/world.ts`) runs ordered upgrade steps through the
+  normal command surface after offline catch-up, so new content reaches live saves without
+  a reset and every core invariant still holds. Every future demo-world content change
+  ships with an upgrade step + a `WORLD_CONTENT_VERSION` bump. Steps are idempotent
+  (saves written by a step's own introducing commit predate the version stamp) and
+  failure-tolerant (a failing step logs and degrades to missing content — never a save
+  reset); `contentVersion` is validated at the restore boundary, and a re-save never
+  stamps below the version a newer app wrote (stale service-worker bundles).
 - **Islands are procedural from hand-authored parts**: generator assembles shapes,
   biomes, slot layouts, and distance-scaled deposit tables from a template library.
   Story islands hand-placed at milestones.
