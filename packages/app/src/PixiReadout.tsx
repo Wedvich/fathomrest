@@ -253,12 +253,15 @@ export function PixiReadout(): React.JSX.Element {
               setFrac(fill, frac);
             }
             const out = warehouseOutflowRate(world.state, wh.id);
-            const roundedAmount = Math.round(amount * 10) / 10;
+            // Floor stock, ceil deposits: never show a resource the player can't spend, never
+            // show a deposit as empty while it still has remainder. Epsilon absorbs analytic
+            // float error so a logical 2 at 1.9999999999 doesn't floor to 1.
+            const roundedAmount = Math.floor(amount + 1e-9);
             const roundedOut = Math.round(out * 10) / 10;
             if (roundedAmount !== lastAmount || roundedOut !== lastOut) {
               lastAmount = roundedAmount;
               lastOut = roundedOut;
-              readout.text = `${roundedAmount.toFixed(1)} / ${capacity}  (−${roundedOut.toFixed(1)}/s)`;
+              readout.text = `${roundedAmount} / ${capacity}  (−${roundedOut.toFixed(1)}/s)`;
             }
           },
         });
@@ -282,11 +285,11 @@ export function PixiReadout(): React.JSX.Element {
               setFrac(fill, frac);
             }
             const mult = depositMultiplier(world.state, dep.id);
-            const roundedRemaining = Math.round(remaining * 10) / 10;
+            const roundedRemaining = Math.ceil(remaining - 1e-9);
             if (roundedRemaining !== lastRemaining || mult !== lastMult) {
               lastRemaining = roundedRemaining;
               lastMult = mult;
-              readout.text = `${roundedRemaining.toFixed(1)} / ${reserve}  (×${mult})`;
+              readout.text = `${roundedRemaining} / ${reserve}  (×${mult})`;
             }
           },
         });
