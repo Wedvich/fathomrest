@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { offlineElapsedSeconds } from "./clock.ts";
 import { getDeposit } from "./components/deposit.ts";
+import { getWarehouse } from "./components/warehouse.ts";
 import { peekEvent } from "./events.ts";
 import { idFromNumber } from "./ids.ts";
+import { islandId } from "./island.ts";
 import { resourceType } from "./resource.ts";
 import {
   deserializeState,
@@ -25,6 +27,7 @@ import {
 import { createSimState, type SimState } from "./state.ts";
 
 const R = resourceType("stuff");
+const I = islandId("here");
 
 function midFlightState(): {
   state: SimState;
@@ -32,7 +35,7 @@ function midFlightState(): {
   depositId: ReturnType<typeof addDeposit>;
 } {
   const state = createSimState(11, 1_000);
-  const warehouseId = addWarehouse(state, 0, R, 100);
+  const warehouseId = addWarehouse(state, 0, R, I, 100);
   // Tier large enough that the crossing stays pending through every test horizon.
   const depositId = addDeposit(state, 0, R, [{ amount: 1_000, multiplier: 1 }], 0.25);
   addExtractor(state, 0, 2, depositId, warehouseId);
@@ -125,8 +128,8 @@ describe("serializer", () => {
 
   it("round-trips a route network and re-derives identical flows", () => {
     const state = createSimState(5, 0);
-    const source = addWarehouse(state, 0, R, 100);
-    const dest = addWarehouse(state, 0, R, 100);
+    const source = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, R, I, 100);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source);
     const route = addRoute(state, 0, source, dest, 3);
@@ -139,8 +142,8 @@ describe("serializer", () => {
 
   function routeDoc(): SaveDocument {
     const state = createSimState(5, 0);
-    const source = addWarehouse(state, 0, R, 100);
-    const dest = addWarehouse(state, 0, R, 100);
+    const source = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, R, I, 100);
     addRoute(state, 0, source, dest, 3);
     return serializeState(state);
   }
@@ -233,6 +236,42 @@ describe("serializer", () => {
     expect(() => deserializeState({ ...doc, warehouses })).toThrow(/resource/);
   });
 
+  it("preserves the warehouse island tag across a round-trip", () => {
+    const { state, warehouseId } = midFlightState();
+    const restored = deserializeState(serializeState(state));
+    expect(getWarehouse(restored, warehouseId).islandId).toBe("here");
+  });
+
+  it("migrates a v1 save by backfilling the warehouse island tag", () => {
+    const doc = serializeState(midFlightState().state);
+    // A pre-islandId (v1) document: older version, warehouses lacking the tag.
+    const v1 = {
+      ...doc,
+      version: 1,
+      warehouses: doc.warehouses.map(([id, warehouse]) => {
+        const { islandId: _omit, ...rest } = warehouse;
+        return [id, rest];
+      }),
+    } as unknown as SaveDocument;
+    const restored = deserializeState(v1);
+    // Loads without throwing; every warehouse lands on the default island, and the upgraded
+    // document reports the current version.
+    const reserialized = serializeState(restored);
+    expect(reserialized.version).toBe(serializeState(midFlightState().state).version);
+    for (const [, warehouse] of reserialized.warehouses) {
+      expect(warehouse.islandId).toBe("island-1");
+    }
+  });
+
+  it("rejects a warehouse with an empty island tag", () => {
+    const doc = serializeState(midFlightState().state);
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, islandId: islandId("") },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/islandId/);
+  });
+
   it("rejects an extractor whose deposit and warehouse resources differ", () => {
     const doc = serializeState(midFlightState().state);
     const deposits = doc.deposits.map(([id, deposit]): (typeof doc.deposits)[number] => [
@@ -260,7 +299,8 @@ describe("serializer", () => {
   it("rejects a structurally truncated document", () => {
     // Parsed JSON asserted to the wire type — exactly how a real import arrives; the
     // runtime validator, not the annotation, is the boundary.
-    const doc = JSON.parse('{"version":1}') as SaveDocument;
+    const version = serializeState(midFlightState().state).version;
+    const doc = JSON.parse(`{"version":${version}}`) as SaveDocument;
     expect(() => deserializeState(doc)).toThrow(/invalid save document/);
   });
 });

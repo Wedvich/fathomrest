@@ -11,6 +11,7 @@ import {
 } from "./events.ts";
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
+import { islandId } from "./island.ts";
 import type { PrngState } from "./prng.ts";
 import type { ResourceType } from "./resource.ts";
 import { isStaleEvent } from "./sim.ts";
@@ -20,7 +21,7 @@ import type { SimState } from "./state.ts";
 // entry arrays, events as a sorted list. One codec for export, import, and future cloud
 // sync — the schema never forks.
 
-const SAVE_VERSION = 1;
+const SAVE_VERSION = 2;
 
 export type TableEntries<T> = [Id, T][];
 
@@ -123,9 +124,10 @@ function checkPositive(value: number, field: string): void {
   }
 }
 
-// Resource tags are opaque strings; the sim compares them for equality (route/extractor
-// type-match), so an empty or non-string tag is a corrupt document.
-function checkResource(value: string, field: string): void {
+// Opaque tags (resource type, island id) are plain strings the sim compares only for
+// equality (route/extractor type-match, same-island cost debit), so an empty or non-string
+// tag is a corrupt document.
+function checkTag(value: string, field: string): void {
   if (typeof value !== "string" || value.length === 0) {
     throw invalid(`${field} must be a non-empty string`);
   }
@@ -187,8 +189,9 @@ function validateDocument(doc: SaveDocument): void {
   checkFinite(doc.prng.d, "prng.d");
   const warehouseResource = new Map<number, ResourceType>();
   const warehouseIds = checkTable(doc.warehouses, "warehouses", (warehouse, at, id) => {
-    checkResource(warehouse.resource, `${at}.resource`);
+    checkTag(warehouse.resource, `${at}.resource`);
     warehouseResource.set(id, warehouse.resource);
+    checkTag(warehouse.islandId, `${at}.islandId`);
     checkPositive(warehouse.capacity, `${at}.capacity`);
     checkFinite(warehouse.anchorAmount, `${at}.anchorAmount`);
     if (warehouse.anchorAmount < 0 || warehouse.anchorAmount > warehouse.capacity) {
@@ -207,7 +210,7 @@ function validateDocument(doc: SaveDocument): void {
   });
   const depositResource = new Map<number, ResourceType>();
   const depositIds = checkTable(doc.deposits, "deposits", (deposit, at, id) => {
-    checkResource(deposit.resource, `${at}.resource`);
+    checkTag(deposit.resource, `${at}.resource`);
     depositResource.set(id, deposit.resource);
     if (!Array.isArray(deposit.tiers)) {
       throw invalid(`${at}.tiers must be an array`);
@@ -298,27 +301,49 @@ function validateDocument(doc: SaveDocument): void {
   }
 }
 
+// Forward-migrate an older save document to the current schema. Pre-release saves without a
+// safe upgrade are discarded (ADR-0001 §8), but a new field with a sensible default is worth
+// migrating so idle progress survives the bump. v1 predates the warehouse islandId
+// (island.ts): backfill the default grouping onto every warehouse, then let validateDocument
+// vet the upgraded document exactly as it would a native one.
+const MIGRATION_DEFAULT_ISLAND = islandId("island-1");
+
+function migrateDocument(doc: SaveDocument): SaveDocument {
+  if (doc.version === 1 && Array.isArray(doc.warehouses)) {
+    return {
+      ...doc,
+      version: SAVE_VERSION,
+      warehouses: doc.warehouses.map(([id, warehouse]): [Id, Warehouse] => [
+        id,
+        { ...warehouse, islandId: MIGRATION_DEFAULT_ISLAND },
+      ]),
+    };
+  }
+  return doc;
+}
+
 export function deserializeState(doc: SaveDocument): SimState {
   if (doc === null || typeof doc !== "object") {
     throw invalid("not an object");
   }
-  if (doc.version !== SAVE_VERSION) {
-    throw new Error(`unsupported save version ${doc.version}`);
+  const migrated = migrateDocument(doc);
+  if (migrated.version !== SAVE_VERSION) {
+    throw new Error(`unsupported save version ${migrated.version}`);
   }
-  validateDocument(doc);
+  validateDocument(migrated);
   const events = createEventQueue();
-  for (const event of doc.events) {
+  for (const event of migrated.events) {
     pushEvent(events, { ...event });
   }
   return {
-    epoch: doc.epoch,
-    wallTime: doc.wallTime,
-    nextId: doc.nextId,
-    prng: { ...doc.prng },
+    epoch: migrated.epoch,
+    wallTime: migrated.wallTime,
+    nextId: migrated.nextId,
+    prng: { ...migrated.prng },
     events,
-    extractors: entriesToTable(doc.extractors),
-    warehouses: entriesToTable(doc.warehouses),
-    deposits: entriesToTable(doc.deposits, copyDeposit),
-    routes: entriesToTable(doc.routes),
+    extractors: entriesToTable(migrated.extractors),
+    warehouses: entriesToTable(migrated.warehouses),
+    deposits: entriesToTable(migrated.deposits, copyDeposit),
+    routes: entriesToTable(migrated.routes),
   };
 }

@@ -8,6 +8,7 @@
 
 export type { Id } from "./ids.ts";
 export { resourceType, type ResourceType } from "./resource.ts";
+export { islandId, type IslandId } from "./island.ts";
 export type { PrngState } from "./prng.ts";
 export { offlineElapsedSeconds } from "./clock.ts";
 export type { EventKind, EventQueue, SimEvent } from "./events.ts";
@@ -39,6 +40,7 @@ export {
   addRoute,
   addWarehouse,
   advance,
+  buildExtractor,
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,

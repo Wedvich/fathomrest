@@ -55,6 +55,13 @@ extract, refine, research, and sail out to discover new islands.
   solver "stays per-type" for free. Typed inventories are the prerequisite for refinement
   (raw → refined) and resource-costed building. The type tag is opaque to the core
   (`ResourceType`, a branded string); the resource set is authored content in the app.
+- **Warehouses carry an opaque island tag** (`IslandId`, a branded string like
+  `ResourceType`). A **resource-costed build** debits only stock on the build site's
+  island, spread proportionally across that island's warehouses of each cost resource —
+  you can't pay for one island's buildings out of another's stockpile. Affordability is
+  checked for the whole cost vector before any stock is touched, so a shortfall can't
+  half-charge. Islands are otherwise app-authored content: the core stores the grouping,
+  not island geometry, slots, or adjacency (`sim.ts: buildExtractor`, `island.ts`).
 - Longer refinement chains require networking specialized islands — that is the
   strategy layer.
 

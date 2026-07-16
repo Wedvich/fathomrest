@@ -24,6 +24,7 @@ import {
 import { peekEvent, popEvent, pushEvent, type SimEvent } from "./events.ts";
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
+import type { IslandId } from "./island.ts";
 import type { ResourceType } from "./resource.ts";
 import { allocId, type SimState } from "./state.ts";
 
@@ -510,14 +511,18 @@ export function addWarehouse(
   state: SimState,
   t: number,
   resource: ResourceType,
+  island: IslandId,
   capacity: number,
 ): Id {
+  if (island.length === 0) {
+    throw new Error("warehouse island must be a non-empty tag");
+  }
   if (!(capacity > 0)) {
     throw new Error(`warehouse capacity must be > 0, got ${capacity}`);
   }
   advance(state, t);
   const id = allocId(state);
-  setWarehouse(state, id, createWarehouse(resource, capacity, state.epoch));
+  setWarehouse(state, id, createWarehouse(resource, island, capacity, state.epoch));
   deriveAll(state);
   return id;
 }
@@ -548,13 +553,16 @@ export function addDeposit(
   return id;
 }
 
-export function addExtractor(
+// Shared extractor wiring validation: rate sign, both endpoints exist, and the deposit's
+// resource matches the warehouse's (the solver ignores types, so a mismatch must be caught
+// here). Returns the target warehouse for callers that need it (buildExtractor reads its
+// island for the cost debit).
+function checkExtractorWiring(
   state: SimState,
-  t: number,
   rate: number,
   depositId: Id,
   warehouseId: Id,
-): Id {
+): Warehouse {
   if (!(rate >= 0)) {
     throw new Error(`extractor rate must be >= 0, got ${rate}`);
   }
@@ -565,7 +573,90 @@ export function addExtractor(
       `extractor resource mismatch: deposit yields ${deposit.resource}, warehouse stores ${warehouse.resource}`,
     );
   }
+  return warehouse;
+}
+
+export function addExtractor(
+  state: SimState,
+  t: number,
+  rate: number,
+  depositId: Id,
+  warehouseId: Id,
+): Id {
+  checkExtractorWiring(state, rate, depositId, warehouseId);
   advance(state, t);
+  const id = allocId(state);
+  setExtractor(state, id, createExtractor(rate, depositId, warehouseId));
+  deriveAll(state);
+  return id;
+}
+
+// Debit a build cost from one island's stock. For each resource in the cost vector, spread
+// the charge across every warehouse on the build site's island that stores it, in
+// proportion to each one's current holding. Affordability is checked for the WHOLE vector
+// before any warehouse is touched, so a shortfall on one resource can't half-charge the
+// player. Reads amounts at t (callers advance to t first) and leaves each payer re-anchored
+// at t for the following deriveAll. Iterates in table order (forEachWarehouse) and cost in
+// its Map insertion order, so replay stays bit-identical (docs/browser-performance.md).
+function debitCost(
+  state: SimState,
+  t: number,
+  island: IslandId,
+  cost: ReadonlyMap<ResourceType, number>,
+): void {
+  const plans: {
+    payers: { warehouse: Warehouse; available: number }[];
+    amount: number;
+    total: number;
+  }[] = [];
+  for (const [resource, amount] of cost) {
+    if (!Number.isFinite(amount) || !(amount >= 0)) {
+      throw new Error(`build cost for ${resource} must be finite and >= 0, got ${amount}`);
+    }
+    if (amount === 0) {
+      continue;
+    }
+    const payers: { warehouse: Warehouse; available: number }[] = [];
+    let total = 0;
+    forEachWarehouse(state, (_id, warehouse) => {
+      if (warehouse.islandId === island && warehouse.resource === resource) {
+        const available = clampedAmount(warehouse, t);
+        payers.push({ warehouse, available });
+        total += available;
+      }
+    });
+    if (total < amount) {
+      throw new Error(
+        `insufficient ${resource} on island ${island}: need ${amount}, have ${total}`,
+      );
+    }
+    plans.push({ payers, amount, total });
+  }
+  // Every resource affordable — debit proportionally. share_i = amount * available_i / total
+  // <= available_i (amount <= total), so no warehouse is ever driven negative.
+  for (const { payers, amount, total } of plans) {
+    for (const { warehouse, available } of payers) {
+      warehouse.anchorAmount = available - (amount * available) / total;
+      warehouse.anchorTime = t;
+    }
+  }
+}
+
+// Player build command: pay `cost` from the build site's island, then place the extractor,
+// atomically. Same validate -> advance -> mutate -> derive shape as addExtractor, but the
+// resources leave stock and the producer appears in one command at t. Cost is charged only
+// against the target warehouse's island (island.ts) — stock on other islands is untouchable.
+export function buildExtractor(
+  state: SimState,
+  t: number,
+  cost: ReadonlyMap<ResourceType, number>,
+  rate: number,
+  depositId: Id,
+  warehouseId: Id,
+): Id {
+  const warehouse = checkExtractorWiring(state, rate, depositId, warehouseId);
+  advance(state, t);
+  debitCost(state, t, warehouse.islandId, cost);
   const id = allocId(state);
   setExtractor(state, id, createExtractor(rate, depositId, warehouseId));
   deriveAll(state);

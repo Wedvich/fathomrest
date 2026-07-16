@@ -1,6 +1,7 @@
 import {
   addDeposit,
   addExtractor,
+  buildExtractor as buildExtractorCmd,
   addRoute,
   addWarehouse,
   advance,
@@ -8,10 +9,12 @@ import {
   deserializeState,
   forEachExtractor,
   offlineElapsedSeconds,
+  islandId,
   resourceType,
   serializeState,
   setWarehousePullRate,
   type Id,
+  type ResourceType,
   type SaveDocument,
   type SimState,
 } from "@fathomrest/core";
@@ -52,19 +55,22 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   // rejected by the core (sim.ts).
   const ore = resourceType("ore");
   const stone = resourceType("stone");
+  // Single starting island: all three warehouses share it, so a build here can spend ore
+  // shipped in from the Pier/Depot but never stock parked on another island.
+  const home = islandId("home");
 
   // Rich vein that depletes to a lean perpetual floor.
   const oreDeposit = addDeposit(state, 0, ore, [{ amount: 500, multiplier: 2 }], 0.5);
 
-  const pierWarehouse = addWarehouse(state, 0, ore, 100);
-  const depotWarehouse = addWarehouse(state, 0, ore, 200);
+  const pierWarehouse = addWarehouse(state, 0, ore, home, 100);
+  const depotWarehouse = addWarehouse(state, 0, ore, home, 200);
 
   addExtractor(state, 0, 5, oreDeposit, pierWarehouse);
 
   // Unworked vein + its idle warehouse: no extractor until the player builds one, so the
   // Quarry row sits at zero until the Build command wires a producer (buildExtractor).
   const graniteDeposit = addDeposit(state, 0, stone, [{ amount: 500, multiplier: 2 }], 0.5);
-  const quarryWarehouse = addWarehouse(state, 0, stone, 100);
+  const quarryWarehouse = addWarehouse(state, 0, stone, home, 100);
 
   // Pier drains a little locally and ships the surplus up the route to the depot.
   setWarehousePullRate(state, 0, pierWarehouse, 3);
@@ -97,6 +103,13 @@ export function snapshotWorld(world: DemoWorld): SavedWorld {
 // Nominal draw of the extractor the player builds at the build site.
 const BUILD_EXTRACTOR_RATE = 5;
 
+// Placeholder build price: the stone extractor is paid for in ore, drawn proportionally from
+// every ore warehouse on the build site's island (Pier + Depot). Real prices arrive with the
+// economy pass.
+const BUILD_EXTRACTOR_COST: ReadonlyMap<ResourceType, number> = new Map([
+  [resourceType("ore"), 20],
+]);
+
 export function isExtractorBuilt(world: DemoWorld): boolean {
   let built = false;
   forEachExtractor(world.state, (_id, extractor) => {
@@ -106,18 +119,25 @@ export function isExtractorBuilt(world: DemoWorld): boolean {
 }
 
 // The first player command: place an extractor on the build site's deposit at sim time t,
-// starting income. Idempotent — a second build is a no-op. Goes through the same core
-// command (addExtractor) the demo world is assembled from; addExtractor advances to t
-// before wiring, so income begins exactly at t.
-export function buildExtractor(world: DemoWorld, t: number): void {
-  if (isExtractorBuilt(world)) return;
-  addExtractor(
-    world.state,
-    t,
-    BUILD_EXTRACTOR_RATE,
-    world.buildSite.depositId,
-    world.buildSite.warehouseId,
-  );
+// paying BUILD_EXTRACTOR_COST from the island's ore stock (core buildExtractor advances to t,
+// debits, then wires the producer, so income begins exactly at t). Idempotent; returns false
+// if already built or the cost can't be met yet (placeholder for an affordability-gated
+// button — the real UI will disable Build until the island can pay).
+export function buildExtractor(world: DemoWorld, t: number): boolean {
+  if (isExtractorBuilt(world)) return false;
+  try {
+    buildExtractorCmd(
+      world.state,
+      t,
+      BUILD_EXTRACTOR_COST,
+      BUILD_EXTRACTOR_RATE,
+      world.buildSite.depositId,
+      world.buildSite.warehouseId,
+    );
+    return true;
+  } catch {
+    return false; // insufficient stock on the island — retry once ore has accrued
+  }
 }
 
 // Rebuild a world from a save, folding the wall-clock gap since save into sim time

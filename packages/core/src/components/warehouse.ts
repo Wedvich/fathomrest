@@ -1,4 +1,5 @@
 import type { Id } from "../ids.ts";
+import type { IslandId } from "../island.ts";
 import type { ResourceType } from "../resource.ts";
 import type { SimState } from "../state.ts";
 
@@ -12,6 +13,9 @@ export interface Warehouse {
   // The single resource this warehouse stores; incoming extractors and routes must match
   // it (sim.ts: addExtractor, addRoute). Opaque tag, compared only for equality.
   resource: ResourceType;
+  // Opaque grouping tag (island.ts). The core compares it only for equality — resource-
+  // costed building debits stock solely from warehouses sharing the build site's island.
+  islandId: IslandId;
   capacity: number;
   // Closed-form anchor: amount(t) = anchorAmount + netRate * (t - anchorTime), clamped
   // to [0, capacity]. Always evaluated from the anchor, never accumulated incrementally
@@ -39,11 +43,13 @@ export interface Warehouse {
 
 export function createWarehouse(
   resource: ResourceType,
+  island: IslandId,
   capacity: number,
   anchorTime: number,
 ): Warehouse {
   return {
     resource,
+    islandId: island,
     capacity,
     anchorAmount: 0,
     anchorTime,
