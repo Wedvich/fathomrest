@@ -591,6 +591,14 @@ export function addWarehouse(
   if (!(capacity > 0)) {
     throw new Error(`warehouse capacity must be > 0, got ${capacity}`);
   }
+  // One warehouse per (island, resource): an island holds a single pool for each resource,
+  // so every extractor of a type feeds one bar and a build debits one pool (islandWarehouse,
+  // debitCost). Same rule enforced at the import boundary (serialize.ts).
+  if (islandWarehouse(state, island, resource) !== undefined) {
+    throw new Error(
+      `island ${island} already has a ${resource} warehouse (one pool per island per resource)`,
+    );
+  }
   advance(state, t);
   const id = allocId(state);
   setWarehouse(state, id, createWarehouse(resource, island, capacity, state.epoch));
@@ -678,44 +686,36 @@ export function addExtractor(
   return id;
 }
 
-type Payer = { warehouse: Warehouse; available: number };
-
-// Every warehouse on `island` storing `resource`, with each one's clamped amount at t and
-// their sum. Shared by debitCost (which spends it) and canAffordBuild (which only checks the
-// total), so the affordability rule and the debit can never drift apart. Table order
-// (forEachWarehouse) keeps replay bit-identical (docs/browser-performance.md).
-function islandPayers(
+// The single warehouse on `island` storing `resource`, or undefined if the island has none.
+// One per (island, resource) is a core invariant (addWarehouse, and the import boundary), so
+// this uniquely identifies the pool a build debits. Table order (forEachWarehouse) keeps
+// replay bit-identical (docs/browser-performance.md).
+function islandWarehouse(
   state: SimState,
-  t: number,
   island: IslandId,
   resource: ResourceType,
-): { payers: Payer[]; total: number } {
-  const payers: Payer[] = [];
-  let total = 0;
+): Warehouse | undefined {
+  let found: Warehouse | undefined;
   forEachWarehouse(state, (_id, warehouse) => {
     if (warehouse.islandId === island && warehouse.resource === resource) {
-      const available = clampedAmount(warehouse, t);
-      payers.push({ warehouse, available });
-      total += available;
+      found = warehouse;
     }
   });
-  return { payers, total };
+  return found;
 }
 
-// Debit a build cost from one island's stock. For each resource in the cost vector, spread
-// the charge across every warehouse on the build site's island that stores it, in
-// proportion to each one's current holding. Affordability is checked for the WHOLE vector
-// before any warehouse is touched, so a shortfall on one resource can't half-charge the
-// player. Reads amounts at t (callers advance to t first) and leaves each payer re-anchored
-// at t for the following deriveAll. Iterates in table order (forEachWarehouse) and cost in
-// its Map insertion order, so replay stays bit-identical (docs/browser-performance.md).
+// Debit a build cost from one island's stock. Each cost resource maps to that island's single
+// pool for it (islandWarehouse). Affordability is checked for the WHOLE vector before any pool
+// is touched, so a shortfall on one resource can't half-charge the player. Reads amounts at t
+// (callers advance to t first) and leaves each debited pool re-anchored at t for the following
+// deriveAll. Cost is iterated in its Map insertion order, so replay stays bit-identical.
 function debitCost(
   state: SimState,
   t: number,
   island: IslandId,
   cost: ReadonlyMap<ResourceType, number>,
 ): void {
-  const plans: { payers: Payer[]; amount: number; total: number }[] = [];
+  const plans: { warehouse: Warehouse; available: number; amount: number }[] = [];
   for (const [resource, amount] of cost) {
     if (!Number.isFinite(amount) || !(amount >= 0)) {
       throw new Error(`build cost for ${resource} must be finite and >= 0, got ${amount}`);
@@ -723,29 +723,28 @@ function debitCost(
     if (amount === 0) {
       continue;
     }
-    const { payers, total } = islandPayers(state, t, island, resource);
-    if (total < amount) {
+    const warehouse = islandWarehouse(state, island, resource);
+    const available = warehouse === undefined ? 0 : clampedAmount(warehouse, t);
+    if (warehouse === undefined || available < amount) {
       throw new Error(
-        `insufficient ${resource} on island ${island}: need ${amount}, have ${total}`,
+        `insufficient ${resource} on island ${island}: need ${amount}, have ${available}`,
       );
     }
-    plans.push({ payers, amount, total });
+    plans.push({ warehouse, available, amount });
   }
-  // Every resource affordable — debit proportionally. share_i = amount * available_i / total
-  // <= available_i (amount <= total), so no warehouse is ever driven negative.
-  for (const { payers, amount, total } of plans) {
-    for (const { warehouse, available } of payers) {
-      warehouse.anchorAmount = available - (amount * available) / total;
-      warehouse.anchorTime = t;
-    }
+  // Every resource affordable — debit the single pool for each (amount <= available, so it is
+  // never driven negative).
+  for (const { warehouse, available, amount } of plans) {
+    warehouse.anchorAmount = available - amount;
+    warehouse.anchorTime = t;
   }
 }
 
 // Read-only affordability check mirroring debitCost's whole-vector precondition: true iff
 // every resource in `cost` is fully covered by stock on `island` at t. Advances and mutates
 // nothing — callers (the build UI) advance to t first, same query contract as
-// warehouseAmountAt. Uses the same per-resource island sum as debitCost (islandPayers), so a
-// button that reports "affordable" can never be refused by the subsequent build.
+// warehouseAmountAt. Reads the same per-resource island pool as debitCost (islandWarehouse),
+// so a button that reports "affordable" can never be refused by the subsequent build.
 export function canAffordBuild(
   state: SimState,
   t: number,
@@ -759,7 +758,8 @@ export function canAffordBuild(
     if (amount === 0) {
       continue;
     }
-    if (islandPayers(state, t, island, resource).total < amount) {
+    const warehouse = islandWarehouse(state, island, resource);
+    if (warehouse === undefined || clampedAmount(warehouse, t) < amount) {
       return false;
     }
   }

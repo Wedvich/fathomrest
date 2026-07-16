@@ -32,10 +32,11 @@ export interface DemoWorld {
 }
 
 // A deposit and everything the app needs to offer it as a build site: the core deposit id,
-// the (initially producer-less) warehouse an extractor would fill, and the build price/rate.
-// This unifies "deposit" and "build site" — a deposit IS the thing you build an extractor on.
-// The warehouse has no producer until built, so this pairing can't be re-derived from core
-// state; it is carried and persisted. `cost` is serializable entries (a Map is built when the
+// the resource pool an extractor would fill (shared by every deposit of the same resource on
+// the island — one pool per (island, resource)), and the build price/rate. This unifies
+// "deposit" and "build site" — a deposit IS the thing you build an extractor on. Whether a
+// deposit is worked is re-derivable from core state (an extractor wired to it), but the
+// deposit->pool pairing and price are not, so they are carried and persisted. `cost` is serializable entries (a Map is built when the
 // core command is called) matching what the core buildExtractor cost vector expects.
 export interface Deposit {
   readonly id: Id;
@@ -61,7 +62,7 @@ export interface SavedWorld {
 
 const EXTRACTOR_RATE = 1; // units/s an extractor produces once built
 const WAREHOUSE_CAP = 100;
-const STARTING_STOCK = 30; // seeded into each resource's "A" warehouse at t=0
+const STARTING_STOCK = 30; // seeded into each resource's pool at t=0
 const BUILD_COST = 20; // paid in the *other* resource
 
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
@@ -80,36 +81,41 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const woodCost: readonly (readonly [ResourceType, number])[] = [[stone, BUILD_COST]];
   const stoneCost: readonly (readonly [ResourceType, number])[] = [[wood, BUILD_COST]];
 
+  // One pool per (island, resource) — a single Wood pool and a single Stone pool (core
+  // invariant, sim.ts addWarehouse). Every extractor of a resource feeds its one pool, so two
+  // wood veins make the Wood bar fill twice as fast rather than filling two separate bars.
+  const woodPool = addWarehouse(state, 0, wood, home, WAREHOUSE_CAP);
+  const stonePool = addWarehouse(state, 0, stone, home, WAREHOUSE_CAP);
+
   const makeDeposit = (
     resource: ResourceType,
+    warehouseId: Id,
     label: string,
     cost: readonly (readonly [ResourceType, number])[],
   ): Deposit => {
     // Rich vein depleting to a lean perpetual floor (mirrors the earlier placeholder).
     const id = addDeposit(state, 0, resource, [{ amount: 500, multiplier: 2 }], 0.5);
-    const warehouseId = addWarehouse(state, 0, resource, home, WAREHOUSE_CAP);
     return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
   };
 
-  // Two deposits per resource, all unworked (no extractor). Building the first of each is
-  // affordable from the starting stockpile; the others gate behind accumulation.
-  const woodA = makeDeposit(wood, "Wood A vein", woodCost);
-  const woodB = makeDeposit(wood, "Wood B vein", woodCost);
-  const stoneA = makeDeposit(stone, "Stone A vein", stoneCost);
-  const stoneB = makeDeposit(stone, "Stone B vein", stoneCost);
+  // Two deposits per resource, all unworked (no extractor), each feeding its resource's shared
+  // pool. Building the first of each is affordable from the starting stockpile; the others gate
+  // behind accumulation.
+  const woodA = makeDeposit(wood, woodPool, "Wood A vein", woodCost);
+  const woodB = makeDeposit(wood, woodPool, "Wood B vein", woodCost);
+  const stoneA = makeDeposit(stone, stonePool, "Stone A vein", stoneCost);
+  const stoneB = makeDeposit(stone, stonePool, "Stone B vein", stoneCost);
 
   // Starting stockpile: enough to build one wood + one stone extractor (BUILD_COST each),
   // leaving a remainder the next builds must wait for the new extractors to top back up.
-  grantResource(state, 0, woodA.warehouseId, STARTING_STOCK);
-  grantResource(state, 0, stoneA.warehouseId, STARTING_STOCK);
+  grantResource(state, 0, woodPool, STARTING_STOCK);
+  grantResource(state, 0, stonePool, STARTING_STOCK);
 
   return {
     state,
     warehouses: [
-      { id: woodA.warehouseId, label: "Wood A" },
-      { id: woodB.warehouseId, label: "Wood B" },
-      { id: stoneA.warehouseId, label: "Stone A" },
-      { id: stoneB.warehouseId, label: "Stone B" },
+      { id: woodPool, label: "Wood" },
+      { id: stonePool, label: "Stone" },
     ],
     deposits: [woodA, woodB, stoneA, stoneB],
     contentVersion: WORLD_CONTENT_VERSION,

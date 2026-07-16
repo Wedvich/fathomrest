@@ -192,9 +192,9 @@ identical state. The only irreplaceable data is player input. Therefore:
 - **Resource-costed building** (`sim.ts: buildExtractor`, DESIGN.md economy) is a "jagged"
   consumer — a lump leaves stock all at once, not smoothly — but it is safe because it fires
   only at a **command boundary**, never on a timer. One command atomically pays a cost vector
-  and wires the producer: the charge is a discrete drop in the affected warehouses' stored
-  amount at the command time, spread proportionally across the build site's island (§below),
-  after which the usual closed-form flow resumes from the lower anchor. Because the drop is a
+  and wires the producer: the charge is a discrete drop in the stored amount of the build
+  site's island's pool for each cost resource (one warehouse per island per resource — §below)
+  at the command time, after which the usual closed-form flow resumes from the lower anchor. Because the drop is a
   structural state change (§2.3), not throughput, it needs no new event kind and no per-tick
   feedback — it passes the litmus test by construction. A _periodic_ batch consumer (consume
   X every Y seconds) would be the harder case: legal only if whole periods are folded
@@ -204,7 +204,12 @@ identical state. The only irreplaceable data is player input. Therefore:
   serialized exactly like `ResourceType` — the core compares it for equality and persists it,
   but island geometry/slots/adjacency stay app-authored content. It exists so a build debits
   only same-island stock; it never enters a closed-form `f(t)` or a crossing time, so it sits
-  outside the litmus concerns. Adding the field to `Warehouse` is an incompatible save-schema
+  outside the litmus concerns. `(islandId, resource)` is **unique** — one warehouse (pool) per
+  pair, enforced at the command boundary (`sim.ts: addWarehouse`) and re-checked on import
+  (`serialize.ts: validateDocument`); the build debit therefore resolves each cost resource to
+  a single pool (`islandWarehouse`) rather than spreading across several. The invariant is a
+  structural equality check, not a closed-form input, so like the tag itself it sits outside
+  the litmus concerns. Adding the field to `Warehouse` is an incompatible save-schema
   change, so `SAVE_VERSION` was bumped (§8); rather than discard existing saves,
   `deserializeState` forward-migrates a v1 document by backfilling a default island tag, so a
   routine schema bump preserves idle progress instead of resetting players to epoch 0.

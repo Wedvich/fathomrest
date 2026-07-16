@@ -30,7 +30,10 @@ import {
 import { createSimState, type SimState } from "./state.ts";
 
 const R = resourceType("stuff");
+// One warehouse per (island, resource): route fixtures put source and destination on distinct
+// islands so two same-typed warehouses can coexist (the solver ignores island tags).
 const I = islandId("here");
+const J = islandId("there");
 
 function midFlightState(): {
   state: SimState;
@@ -132,7 +135,7 @@ describe("serializer", () => {
   it("round-trips a route network and re-derives identical flows", () => {
     const state = createSimState(5, 0);
     const source = addWarehouse(state, 0, R, I, 100);
-    const dest = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, R, J, 100);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source);
     const route = addRoute(state, 0, source, dest, 3);
@@ -146,7 +149,7 @@ describe("serializer", () => {
   function routeDoc(): SaveDocument {
     const state = createSimState(5, 0);
     const source = addWarehouse(state, 0, R, I, 100);
-    const dest = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, R, J, 100);
     addRoute(state, 0, source, dest, 3);
     return serializeState(state);
   }
@@ -275,6 +278,17 @@ describe("serializer", () => {
     expect(() => deserializeState({ ...doc, warehouses })).toThrow(/islandId/);
   });
 
+  it("rejects two warehouses sharing an island and resource (the pool invariant)", () => {
+    // routeDoc's source/dest are the same resource on distinct islands; collapsing both onto
+    // island I makes them a duplicate (I, stuff) pair, which import must reject.
+    const doc = routeDoc();
+    const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [
+      id,
+      { ...warehouse, islandId: I },
+    ]);
+    expect(() => deserializeState({ ...doc, warehouses })).toThrow(/duplicate/);
+  });
+
   it("rejects an extractor whose deposit and warehouse resources differ", () => {
     const doc = serializeState(midFlightState().state);
     const deposits = doc.deposits.map(([id, deposit]): (typeof doc.deposits)[number] => [
@@ -305,7 +319,9 @@ describe("serializer", () => {
   } {
     const state = createSimState(5, 0);
     const source = addWarehouse(state, 0, R, I, 100);
-    const dest = addWarehouse(state, 0, resourceType("refined"), I, 100);
+    // On a separate island so the same-type rejection test can retype dest to R without also
+    // tripping the (island, resource) pool invariant.
+    const dest = addWarehouse(state, 0, resourceType("refined"), J, 100);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source);
     const converter = addConverter(state, 0, source, dest, 4, 0.5);
@@ -359,7 +375,7 @@ describe("serializer", () => {
   it("rejects a combined route+converter cycle on import", () => {
     const state = createSimState(5, 0);
     const a = addWarehouse(state, 0, R, I, 100);
-    const b = addWarehouse(state, 0, R, I, 100);
+    const b = addWarehouse(state, 0, R, J, 100);
     const c = addWarehouse(state, 0, resourceType("refined"), I, 100);
     addRoute(state, 0, a, b, 3);
     addConverter(state, 0, b, c, 2, 0.5);

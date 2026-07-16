@@ -6,54 +6,52 @@ pick up next".
 
 ## Done last session
 
-**Building pillar + wood/stone bootstrap economy.** The demo world is now a real building
-loop: it boots with a seeded stockpile and **no extractors**, and the early game is building
-extractors on deposits, gated by cross-resource costs.
+**One pool per (island, resource).** Fixed the "Wood A / Wood B / Stone A / Stone B" readout:
+each resource now has a single warehouse (pool) per island, so two wood extractors fill one
+Wood bar faster instead of two bars in parallel. This is a **hard core invariant**, not just
+demo-world authoring (chosen over "convention only" knowing the cost below).
 
-Core (`packages/core/src/sim.ts`, exported via `index.ts`):
+Core (`packages/core`):
 
-- `grantResource(state, t, warehouseId, amount)` — seed stock straight into a warehouse
-  (no producer needed), capped at capacity. Backs the starting stockpile; also the future
-  hook for rewards/gifts.
-- `canAffordBuild(state, t, island, cost)` — read-only affordability query mirroring
-  `debitCost`'s whole-vector precondition. The shared per-resource island sum is factored
-  into `islandPayers`, so the check and the debit can't drift. Used to drive the build
-  buttons' disabled state.
+- `sim.ts addWarehouse` rejects a second warehouse for an existing `(island, resource)` pair;
+  `serialize.ts validateDocument` re-checks it on import (NUL-joined pair set).
+- `islandPayers` (proportional multi-warehouse debit spread) **removed** — replaced by
+  `islandWarehouse` returning the single pool. `debitCost`/`canAffordBuild` now resolve each
+  cost resource to one pool. The proportional-spread feature is gone (was vacuous under the
+  invariant); ADR-0001 §Island grouping / §Resource-costed building updated to match.
+- No `SAVE_VERSION` bump: pre-pool saves carry duplicate `(island, resource)` pairs and fail
+  the new import check, so the existing restore→quarantine path resets them. Recorded in
+  DESIGN.md as the **second** blessed one-time reset exception (pre-release only).
 
 App (`packages/app/src/sim/world.ts`):
 
-- `createDemoWorld` rewritten to wood + stone. 4 deposits (2 wood, 2 stone), each with its
-  own empty target warehouse and **no extractor**; the two "A" warehouses seeded with 30
-  each. Extractor rate 1/s; warehouse cap 100; build cost 20 of the _other_ resource
-  (all placeholder tuning). Removed the old ore/ingot/Foundry converter and Pier→Depot route.
-- **Ubiquitous language**: the old `BuildSite` type is folded into a richer app-level
-  `Deposit` (id, warehouseId, label, resource, cost, rate) — a deposit _is_ a build site.
-  `isExtractorBuilt`/`buildExtractor` are now per-deposit.
-- **One-time save reset**: legacy ore/ingot envelopes carried a singular `buildSite`;
-  `restoreWorld` throws on its presence, routing old saves through the existing quarantine
-  path (blessed exception to the no-reset rule — pre-release placeholder content).
-  `WORLD_UPGRADES` reset to `[]`, `WORLD_CONTENT_VERSION` back to 1; the content-upgrade
-  framework itself is retained for future changes.
+- `createDemoWorld` mints one Wood pool + one Stone pool on `home`; all four veins feed their
+  resource's pool. `warehouses` view model is now `[Wood, Stone]`. Cap 100, stock 30, cost 20
+  (placeholder). No `restoreWorld`/readout code changes needed — both are thin maps over the
+  view model.
 
-UI (`packages/app/src/PixiReadout.tsx`): one build button per deposit, created imperatively
-so the React tree stays static; each button's disabled state and label are driven from the
-Pixi ticker via `canAffordBuild` + `isExtractorBuilt` (cost Map and island cached per button
-— no per-frame allocation). Build-on-click still does save-on-command.
+**Consequence baked into the design**: a same-type route is now necessarily **inter-island**
+(one pool per island per resource, routes connect same types). Route/hub/chain test fixtures
+in `sim.test.ts`/`serialize.test.ts` place same-typed warehouses on distinct islands (`I/J/K`)
+purely to satisfy the invariant — the solver still ignores island tags.
 
-`typecheck | lint | format | test` green (85 tests). Verify the app run + production build
-before handing off.
+`typecheck | lint | format | test` green (87 tests). Drove `createDemoWorld` at runtime:
+2 warehouse bars + 4 deposit bars, both wood veins share one pool, Wood fills at 4/s with two
+extractors. Not committed yet.
 
 ## Next session
 
 1. **Make routes and converters buildable/costed through the same layer** — extend the
    `Deposit`-style cost-gated build to routes and converters (needs `addRoute`/`addConverter`
-   fronted by a build command that debits, mirroring `buildExtractor`). This is the natural
-   next increment: right now built warehouses cap out and jam with no consumer, which is the
-   motivation for buildable routes/converters.
-2. **Re-introduce refinement** as a tier layered on wood/stone (the deferred half of the
+   fronted by a build command that debits, mirroring `buildExtractor`). Still the natural next
+   increment: built pools cap out and jam with no consumer. Note routes are now inter-island by
+   construction, so buildable routes are the mechanism for networking island pools.
+2. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
+   authored constants today. A placeable storage building that raises a pool's capacity is the
+   "pool + capacity buildings" model the grill settled on — fold into the costed-builds layer.
+3. **Re-introduce refinement** as a tier layered on wood/stone (the deferred half of the
    pivot). Ships as the first new `WORLD_UPGRADES` step (+ version bump) per the standing rule.
-3. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency — this
-   session did cost-gating only.
+4. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency.
 
 Carried over: the PWA service worker pins old bundles until the update prompt is accepted —
 rebuild `packages/app/dist/` before serving it anywhere.

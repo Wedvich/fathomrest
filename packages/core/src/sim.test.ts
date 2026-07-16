@@ -30,7 +30,12 @@ import { createSimState, type SimState } from "./state.ts";
 // Single shared type for the many single-resource scenarios; type-match cases below use
 // their own distinct tags.
 const R = resourceType("stuff");
+// One warehouse per (island, resource) is a core invariant, so scenarios that need two+
+// same-resource warehouses (routes, hubs, chains) place each on its own island. The transfer
+// solver ignores island tags, so this is purely how fixtures satisfy the invariant.
 const I = islandId("here");
+const J = islandId("there");
+const K = islandId("yonder");
 
 function toyChain(): {
   state: SimState;
@@ -184,7 +189,7 @@ describe("routes", () => {
   it("carries an instant rate-capped flow between warehouses", () => {
     const state = createSimState(42, 0);
     const source = addWarehouse(state, 0, R, I, 1_000);
-    const dest = addWarehouse(state, 0, R, I, 1_000);
+    const dest = addWarehouse(state, 0, R, J, 1_000);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 5, deposit, source); // source inflow 5/s
     const route = addRoute(state, 0, source, dest, 3); // cap below inflow, so runs at cap
@@ -200,7 +205,7 @@ describe("routes", () => {
   it("backs up the source when the destination jams (backpressure travels upstream)", () => {
     const state = createSimState(42, 0);
     const source = addWarehouse(state, 0, R, I, 100);
-    const dest = addWarehouse(state, 0, R, I, 50);
+    const dest = addWarehouse(state, 0, R, J, 50);
     const deposit = addDeposit(state, 0, R, [], 1);
     const extractor = addExtractor(state, 0, 20, deposit, source); // ample supply
     const route = addRoute(state, 0, source, dest, 10);
@@ -220,7 +225,7 @@ describe("routes", () => {
   it("supply-limits the route when the source runs dry (starvation travels downstream)", () => {
     const state = createSimState(42, 0);
     const source = addWarehouse(state, 0, R, I, 100);
-    const dest = addWarehouse(state, 0, R, I, 100);
+    const dest = addWarehouse(state, 0, R, J, 100);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 3, deposit, source); // trickle: below the route cap
     const route = addRoute(state, 0, source, dest, 10);
@@ -241,8 +246,8 @@ describe("routes", () => {
     // P is well-supplied, Q is a trickle; both feed hub D which can only accept its pull.
     const state = createSimState(42, 0);
     const p = addWarehouse(state, 0, R, I, 100);
-    const q = addWarehouse(state, 0, R, I, 100);
-    const hub = addWarehouse(state, 0, R, I, 50);
+    const q = addWarehouse(state, 0, R, J, 100);
+    const hub = addWarehouse(state, 0, R, K, 50);
     const deposit = addDeposit(state, 0, R, [], 1);
     addExtractor(state, 0, 20, deposit, p); // P can push its full route cap
     addExtractor(state, 0, 1, deposit, q); // Q is supply-limited to 1/s
@@ -264,8 +269,8 @@ describe("routes", () => {
     // A -> B -> C, sink at C. With C closed, the whole chain jams full.
     const state = createSimState(42, 0);
     const a = addWarehouse(state, 0, R, I, 100);
-    const b = addWarehouse(state, 0, R, I, 100);
-    const c = addWarehouse(state, 0, R, I, 100);
+    const b = addWarehouse(state, 0, R, J, 100);
+    const c = addWarehouse(state, 0, R, K, 100);
     const deposit = addDeposit(state, 0, R, [], 1);
     const extractor = addExtractor(state, 0, 50, deposit, a);
     const ab = addRoute(state, 0, a, b, 20);
@@ -292,7 +297,7 @@ describe("routes", () => {
   it("rejects self-loops and cycles at the command boundary", () => {
     const state = createSimState(42, 0);
     const a = addWarehouse(state, 0, R, I, 100);
-    const b = addWarehouse(state, 0, R, I, 100);
+    const b = addWarehouse(state, 0, R, J, 100);
     expect(() => addRoute(state, 0, a, a, 5)).toThrow(/differ/);
     addRoute(state, 0, a, b, 5);
     expect(() => addRoute(state, 0, b, a, 5)).toThrow(/cycle/);
@@ -348,7 +353,7 @@ describe("converters", () => {
   it("water-fills a starved source between a route and a converter", () => {
     const state = createSimState(42, 0);
     const source = addWarehouse(state, 0, ore, I, 100);
-    const oreDest = addWarehouse(state, 0, ore, I, 1_000);
+    const oreDest = addWarehouse(state, 0, ore, J, 1_000);
     const ingotDest = addWarehouse(state, 0, ingot, I, 1_000);
     const deposit = addDeposit(state, 0, ore, [], 1);
     addExtractor(state, 0, 3, deposit, source); // trickle below the combined demand of 6
@@ -366,7 +371,7 @@ describe("converters", () => {
     const state = createSimState(42, 0);
     const oreA = addWarehouse(state, 0, ore, I, 100);
     const ingotB = addWarehouse(state, 0, ingot, I, 100);
-    const oreC = addWarehouse(state, 0, ore, I, 100);
+    const oreC = addWarehouse(state, 0, ore, J, 100);
     addConverter(state, 0, oreA, ingotB, 2, 0.5);
     addConverter(state, 0, ingotB, oreC, 2, 1);
     // Closing the loop with either edge kind is rejected before any mutation.
@@ -377,7 +382,7 @@ describe("converters", () => {
   it("rejects same-type endpoints, self-loops, and bad caps/ratios at the boundary", () => {
     const state = createSimState(42, 0);
     const a = addWarehouse(state, 0, ore, I, 100);
-    const b = addWarehouse(state, 0, ore, I, 100);
+    const b = addWarehouse(state, 0, ore, J, 100);
     const c = addWarehouse(state, 0, ingot, I, 100);
     expect(() => addConverter(state, 0, a, b, 2, 0.5)).toThrow(/must differ/);
     expect(() => addConverter(state, 0, a, a, 2, 0.5)).toThrow(/must differ/);
@@ -407,48 +412,54 @@ describe("resource typing", () => {
   });
 });
 
+describe("one pool per island per resource", () => {
+  it("rejects a second warehouse for the same island and resource", () => {
+    const state = createSimState(1, 0);
+    addWarehouse(state, 0, R, I, 100);
+    expect(() => addWarehouse(state, 0, R, I, 100)).toThrow(/already has a/);
+    // A different resource on the same island, or the same resource on another island, is fine.
+    addWarehouse(state, 0, resourceType("other"), I, 100);
+    addWarehouse(state, 0, R, J, 100);
+  });
+});
+
 describe("resource-costed building", () => {
   const ore = resourceType("ore");
   const stone = resourceType("stone");
   const home = islandId("home");
   const other = islandId("other");
 
-  // Two ore warehouses on the home island, seeded to 40 and 20 by t=10, plus an empty stone
-  // quarry to build onto. Returns the pieces the build scenarios assert against.
+  // The home island's single ore pool (one per (island, resource)), seeded to 60 by t=10, plus
+  // an empty stone quarry to build onto. Returns the pieces the build scenarios assert against.
   function homeIsland(): {
     state: SimState;
-    oreA: ReturnType<typeof addWarehouse>;
-    oreB: ReturnType<typeof addWarehouse>;
+    orePool: ReturnType<typeof addWarehouse>;
     stoneDeposit: ReturnType<typeof addDeposit>;
     quarry: ReturnType<typeof addWarehouse>;
   } {
     const state = createSimState(42, 0);
     const oreDeposit = addDeposit(state, 0, ore, [], 1);
-    const oreA = addWarehouse(state, 0, ore, home, 1_000);
-    const oreB = addWarehouse(state, 0, ore, home, 1_000);
-    addExtractor(state, 0, 4, oreDeposit, oreA); // 40 by t=10
-    addExtractor(state, 0, 2, oreDeposit, oreB); // 20 by t=10
+    const orePool = addWarehouse(state, 0, ore, home, 1_000);
+    addExtractor(state, 0, 6, oreDeposit, orePool); // 60 by t=10
     const stoneDeposit = addDeposit(state, 0, stone, [], 1);
     const quarry = addWarehouse(state, 0, stone, home, 100);
-    return { state, oreA, oreB, stoneDeposit, quarry };
+    return { state, orePool, stoneDeposit, quarry };
   }
 
-  it("debits the cost across same-island warehouses in proportion to their stock", () => {
-    const { state, oreA, oreB, stoneDeposit, quarry } = homeIsland();
+  it("debits the build cost from the island's single resource pool", () => {
+    const { state, orePool, stoneDeposit, quarry } = homeIsland();
     buildExtractor(state, 10, new Map([[ore, 30]]), 5, stoneDeposit, quarry);
-    // 40:20 split of a 30 charge -> 20 and 10 drawn; the new extractor then produces stone.
-    expect(warehouseAmountAt(state, oreA, 10)).toBeCloseTo(20, 9);
-    expect(warehouseAmountAt(state, oreB, 10)).toBeCloseTo(10, 9);
+    // 60 ore at t=10, less the 30 charge -> 30 left; the new extractor then produces stone.
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(30, 9);
     expect(warehouseAmountAt(state, quarry, 20)).toBeCloseTo(50, 9);
   });
 
   it("rejects an unaffordable build without touching any stock (atomic)", () => {
-    const { state, oreA, oreB, stoneDeposit, quarry } = homeIsland();
+    const { state, orePool, stoneDeposit, quarry } = homeIsland();
     expect(() => buildExtractor(state, 10, new Map([[ore, 100]]), 5, stoneDeposit, quarry)).toThrow(
       /insufficient/,
     );
-    expect(warehouseAmountAt(state, oreA, 10)).toBeCloseTo(40, 9);
-    expect(warehouseAmountAt(state, oreB, 10)).toBeCloseTo(20, 9);
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
     expect(warehouseAmountAt(state, quarry, 20)).toBe(0); // no producer was wired
   });
 
@@ -465,15 +476,14 @@ describe("resource-costed building", () => {
   });
 
   it("does not debit an affordable resource when another in the cost falls short", () => {
-    const { state, oreA, oreB, stoneDeposit, quarry } = homeIsland();
+    const { state, orePool, stoneDeposit, quarry } = homeIsland();
     // ore (30 <= 60) is affordable, stone (100) is not: the whole command must roll back.
     const cost = new Map([
       [ore, 30],
       [stone, 100],
     ]);
     expect(() => buildExtractor(state, 10, cost, 5, stoneDeposit, quarry)).toThrow(/insufficient/);
-    expect(warehouseAmountAt(state, oreA, 10)).toBeCloseTo(40, 9);
-    expect(warehouseAmountAt(state, oreB, 10)).toBeCloseTo(20, 9);
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
   });
 });
 
@@ -485,14 +495,13 @@ describe("granted stockpile bootstrap", () => {
   const stone = resourceType("stone");
   const home = islandId("home");
 
-  // Two wood + two stone deposits, each with its own empty warehouse; only the "A" warehouses
-  // seeded, mirroring createDemoWorld. Nothing is producing yet.
+  // Two wood + two stone deposits sharing one Wood pool and one Stone pool on the home island
+  // (one per (island, resource), mirroring createDemoWorld). Both pools seeded to 30. Nothing
+  // is producing yet.
   function bootstrap(): {
     state: SimState;
-    woodA: ReturnType<typeof addWarehouse>;
-    woodB: ReturnType<typeof addWarehouse>;
-    stoneA: ReturnType<typeof addWarehouse>;
-    stoneB: ReturnType<typeof addWarehouse>;
+    woodPool: ReturnType<typeof addWarehouse>;
+    stonePool: ReturnType<typeof addWarehouse>;
     woodDepositB: ReturnType<typeof addDeposit>;
     stoneDepositA: ReturnType<typeof addDeposit>;
   } {
@@ -501,42 +510,41 @@ describe("granted stockpile bootstrap", () => {
     const woodDepositB = addDeposit(state, 0, wood, [], 1);
     const stoneDepositA = addDeposit(state, 0, stone, [], 1);
     addDeposit(state, 0, stone, [], 1); // stone deposit B (unworked)
-    const woodA = addWarehouse(state, 0, wood, home, 100);
-    const woodB = addWarehouse(state, 0, wood, home, 100);
-    const stoneA = addWarehouse(state, 0, stone, home, 100);
-    const stoneB = addWarehouse(state, 0, stone, home, 100);
-    grantResource(state, 0, woodA, 30);
-    grantResource(state, 0, stoneA, 30);
-    return { state, woodA, woodB, stoneA, stoneB, woodDepositB, stoneDepositA };
+    const woodPool = addWarehouse(state, 0, wood, home, 100);
+    const stonePool = addWarehouse(state, 0, stone, home, 100);
+    grantResource(state, 0, woodPool, 30);
+    grantResource(state, 0, stonePool, 30);
+    return { state, woodPool, stonePool, woodDepositB, stoneDepositA };
   }
 
   it("seeds the stockpile with no producer and reflects it in canAffordBuild", () => {
-    const { state, woodA, stoneA } = bootstrap();
-    expect(warehouseAmountAt(state, woodA, 0)).toBeCloseTo(30, 9);
-    expect(warehouseAmountAt(state, stoneA, 0)).toBeCloseTo(30, 9);
+    const { state, woodPool, stonePool } = bootstrap();
+    expect(warehouseAmountAt(state, woodPool, 0)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(state, stonePool, 0)).toBeCloseTo(30, 9);
     // No producer: the seed does not grow over time.
-    expect(warehouseAmountAt(state, woodA, 1_000)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(state, woodPool, 1_000)).toBeCloseTo(30, 9);
     // A stone extractor costs 20 wood — affordable now, but 40 wood is not.
     expect(canAffordBuild(state, 0, home, new Map([[wood, 20]]))).toBe(true);
     expect(canAffordBuild(state, 0, home, new Map([[wood, 40]]))).toBe(false);
   });
 
   it("gates the third build behind accumulation from the first two", () => {
-    const { state, woodA, woodB, stoneA, woodDepositB, stoneDepositA } = bootstrap();
+    const { state, woodPool, stonePool, woodDepositB, stoneDepositA } = bootstrap();
     // Build both starters at t=0: stone extractor costs 20 wood, wood extractor costs 20 stone.
-    buildExtractor(state, 0, new Map([[wood, 20]]), 1, stoneDepositA, stoneA);
-    buildExtractor(state, 0, new Map([[stone, 20]]), 1, woodDepositB, woodB);
-    // 30 - 20 = 10 of each left; both new extractors now produce 1/s.
-    expect(warehouseAmountAt(state, woodA, 0)).toBeCloseTo(10, 9);
-    expect(warehouseAmountAt(state, stoneA, 0)).toBeCloseTo(10, 9);
+    buildExtractor(state, 0, new Map([[wood, 20]]), 1, stoneDepositA, stonePool);
+    buildExtractor(state, 0, new Map([[stone, 20]]), 1, woodDepositB, woodPool);
+    // 30 - 20 = 10 in each pool; both new extractors now produce 1/s into their pool.
+    expect(warehouseAmountAt(state, woodPool, 0)).toBeCloseTo(10, 9);
+    expect(warehouseAmountAt(state, stonePool, 0)).toBeCloseTo(10, 9);
     // A further wood extractor costs 20 stone: not yet affordable, only 10 stone on the island.
     expect(canAffordBuild(state, 0, home, new Map([[stone, 20]]))).toBe(false);
-    // stoneA accrues 1/s from t=0; by t=10 the island holds 20 stone and the build unlocks.
+    // The stone pool accrues 1/s from t=0; by t=10 it holds 20 stone and the build unlocks.
     advance(state, 10);
-    expect(warehouseAmountAt(state, stoneA, 10)).toBeCloseTo(20, 9);
+    expect(warehouseAmountAt(state, stonePool, 10)).toBeCloseTo(20, 9);
     expect(canAffordBuild(state, 10, home, new Map([[stone, 20]]))).toBe(true);
-    // Sanity: the woodB warehouse (from the earlier build) is filling too.
-    expect(warehouseAmountAt(state, woodB, 10)).toBeCloseTo(10, 9);
+    // Sanity: the wood pool (fed by the earlier build) is filling too — 10 left after the debit
+    // plus 1/s from the wood extractor -> 20 by t=10.
+    expect(warehouseAmountAt(state, woodPool, 10)).toBeCloseTo(20, 9);
   });
 
   it("clamps a grant at the warehouse capacity", () => {
@@ -613,8 +621,8 @@ describe("determinism", () => {
   function runRouteScenario(stepCount: number): SaveDocument {
     const state = createSimState(13, 0);
     const a = addWarehouse(state, 0, R, I, 400);
-    const b = addWarehouse(state, 0, R, I, 300);
-    const c = addWarehouse(state, 0, R, I, 500);
+    const b = addWarehouse(state, 0, R, J, 300);
+    const c = addWarehouse(state, 0, R, K, 500);
     const refined = addWarehouse(state, 0, resourceType("refined"), I, 250);
     const deposit = addDeposit(state, 0, R, [{ amount: 50_000, multiplier: 2 }], 0.5);
     addExtractor(state, 0, 4, deposit, a);

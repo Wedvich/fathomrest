@@ -51,7 +51,13 @@ extract, refine, research, and sail out to discover new islands.
   starvation resolves within the event that triggers it (ADR-0001 §route solver), so a
   saturated network jams cleanly for the player to unpick — find the true bottleneck (a
   route cap, a closed sink, or a dry deposit), not just any full warehouse.
-- **Resources are typed; a warehouse (and its deposit) holds exactly one type.**
+- **Resources are typed; a warehouse (and its deposit) holds exactly one type.** An island
+  holds **exactly one warehouse per resource — a single pool** (enforced as a core invariant
+  at the command and import boundaries), so a resource shows one bar per island and every
+  extractor of that type feeds it: two wood extractors fill the one Wood bar twice as fast,
+  not two bars in parallel. A consequence: since routes connect same-typed warehouses and a
+  resource has one pool per island, a same-type route is necessarily **inter-island** —
+  transport is the between-islands mechanic, matching the archipelago fantasy.
   Extractors and transport routes only connect matching types (enforced at the command
   and import boundaries); changing type is refinement's job (a converter), never a
   route's. This keeps every quantity a per-type scalar closed form and leaves the flow
@@ -68,10 +74,10 @@ extract, refine, research, and sail out to discover new islands.
   deferred to a future ADR-first effort; they escalate edges to fixed-proportion nodes.
 - **Warehouses carry an opaque island tag** (`IslandId`, a branded string like
   `ResourceType`). A **resource-costed build** debits only stock on the build site's
-  island, spread proportionally across that island's warehouses of each cost resource —
-  you can't pay for one island's buildings out of another's stockpile. Affordability is
-  checked for the whole cost vector before any stock is touched, so a shortfall can't
-  half-charge. Islands are otherwise app-authored content: the core stores the grouping,
+  island — for each cost resource, the island's single pool for it (the one-pool invariant
+  above) — so you can't pay for one island's buildings out of another's stockpile.
+  Affordability is checked for the whole cost vector before any stock is touched, so a
+  shortfall can't half-charge. Islands are otherwise app-authored content: the core stores the grouping,
   not island geometry, slots, or adjacency (`sim.ts: buildExtractor`, `island.ts`).
 - Longer refinement chains require networking specialized islands — that is the
   strategy layer.
@@ -126,6 +132,12 @@ extract, refine, research, and sail out to discover new islands.
   express as an upgrade step, so `restoreWorld` detects the legacy ore/ingot envelope and
   discards it into the quarantine path once. This is a blessed exception for pre-release
   placeholder content only; the no-reset rule stands for all future changes.
+- **One-time exception (second)**: the one-pool-per-island refactor (warehouses merged from
+  per-deposit into a single pool per island per resource) redefined the warehouse invariant.
+  Pre-pool saves carry two same-typed warehouses on one island and so fail the new invariant
+  at the core import boundary (`deserializeState`); the existing restore path quarantines them
+  and boots a fresh world. Blessed for pre-release placeholder content only, on the same terms
+  as the wood/stone pivot above; the no-reset rule still binds all future changes.
 - **Islands are procedural from hand-authored parts**: generator assembles shapes,
   biomes, slot layouts, and distance-scaled deposit tables from a template library.
   Story islands hand-placed at milestones.

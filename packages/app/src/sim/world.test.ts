@@ -29,9 +29,10 @@ function namedDeposits(world: DemoWorld): {
 // the mutation survives a save/reload round-trip (structuredClone stands in for IndexedDB's
 // structured clone, mirroring persistence.ts). Drives the real core commands, no mocks.
 //
-// createDemoWorld's deposits are [Wood A, Wood B, Stone A, Stone B]; only the "A" warehouses
-// are seeded (30 each). A wood extractor costs 20 stone and vice versa; extractor rate 1 * the
-// rich tier's multiplier 2 = 2 units/s produced once built.
+// createDemoWorld's deposits are [Wood A, Wood B, Stone A, Stone B], each vein feeding its
+// resource's single pool (one per (island, resource)); each pool is seeded to 30. A wood
+// extractor costs 20 stone and vice versa; extractor rate 1 * the rich tier's multiplier 2 =
+// 2 units/s produced once built.
 describe("wood/stone build bootstrap", () => {
   it("boots with a seeded stockpile and no extractors", () => {
     const world = createDemoWorld(1, 0);
@@ -40,10 +41,11 @@ describe("wood/stone build bootstrap", () => {
     advance(world.state, 60);
 
     for (const dep of world.deposits) expect(isExtractorBuilt(world, dep.id)).toBe(false);
-    // Seeded warehouses hold exactly the stockpile (no producer grows it); unseeded hold 0.
+    // Both wood veins point at the one Wood pool; it holds exactly the stockpile (no producer
+    // grows it), likewise the Stone pool.
+    expect(woodB.warehouseId).toBe(woodA.warehouseId);
     expect(warehouseAmountAt(world.state, woodA.warehouseId, 60)).toBeCloseTo(30, 9);
     expect(warehouseAmountAt(world.state, stoneA.warehouseId, 60)).toBeCloseTo(30, 9);
-    expect(warehouseAmountAt(world.state, woodB.warehouseId, 60)).toBe(0);
     expect(snapshotWorld(world).contentVersion).toBe(WORLD_CONTENT_VERSION);
   });
 
@@ -55,9 +57,9 @@ describe("wood/stone build bootstrap", () => {
     expect(buildExtractor(world, woodA.id, 10)).toBe(true);
 
     expect(isExtractorBuilt(world, woodA.id)).toBe(true);
-    // The wood extractor is paid in stone: the island's only stone (stoneA, 30) drops to 10.
+    // The wood extractor is paid in stone: the island's Stone pool (30) drops to 10.
     expect(warehouseAmountAt(world.state, stoneA.warehouseId, 10)).toBeCloseTo(10, 9);
-    // woodA warehouse: 30 seeded + 2/s from the t=10 build -> 50 by t=20.
+    // Wood pool: 30 seeded + 2/s from the t=10 build -> 50 by t=20.
     expect(warehouseAmountAt(world.state, woodA.warehouseId, 20)).toBeCloseTo(50, 9);
   });
 
@@ -69,8 +71,8 @@ describe("wood/stone build bootstrap", () => {
     expect(buildExtractor(world, woodA.id, 0)).toBe(true); // stone 30 -> 10
     expect(buildExtractor(world, woodB.id, 0)).toBe(false); // 10 stone left: unaffordable
 
-    // Build a stone extractor (costs 20 wood, from woodA's 30) so stone starts accruing again.
-    expect(buildExtractor(world, stoneA.id, 0)).toBe(true); // stoneA now produces 2/s
+    // Build a stone extractor (costs 20 wood, from the Wood pool's 30) so stone accrues again.
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true); // Stone pool now gains 2/s
     // stone: 10 + 2/s -> 20 by t=5, so the second wood extractor unlocks.
     advance(world.state, 5);
     expect(warehouseAmountAt(world.state, stoneA.warehouseId, 5)).toBeCloseTo(20, 9);
