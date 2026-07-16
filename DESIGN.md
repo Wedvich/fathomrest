@@ -18,6 +18,10 @@ extract, refine, research, and sail out to discover new islands.
 - Warehouses have capacity limits. A full warehouse **blocks** further accumulation —
   and pauses that deposit's depletion, so absence stalls progress rather than wasting it.
 - Returning to a jammed network is the intended session-starter: find the bottleneck, fix it.
+- **Caps are deliberately tight — active play is the primary throughput.** Offline yield
+  is a bounded "welcome back" stockpile plus a jam to unpick, never the main income.
+  Balance rates for active sessions first, then size caps so waiting past the jam earns
+  nothing; a schedule that incentivizes waiting around in real time is a balancing bug.
 
 ### Active half
 
@@ -139,10 +143,13 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
 
 - Name; concrete resource/biome list (vertical slice forces these).
 - Asset-generation tooling.
-- Tuning constants: depletion curves, cap sizes, UPS value — playtest territory.
+- Tuning constants: depletion curves, cap sizes — playtest territory, under the
+  tight-caps pacing principle (core loop, idle half).
 
 ## Standing risk
 
 **Hybrid decay**: if expedition outfitting gets trivialized by resource surplus, the
 active half degenerates into a timer and the game collapses into pure idle. The
 resource-sample research gates are the main defense — protect them during balancing.
+Tight warehouse caps (core loop, idle half) are the second: bounded stockpiles keep
+surplus from ever getting deep enough to trivialize outfitting.
