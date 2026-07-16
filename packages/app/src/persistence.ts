@@ -52,6 +52,12 @@ async function openDbWithRetry(retries = 2): Promise<IDBDatabase> {
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+// Set by resetSave() and never cleared: once a reset is underway the page is about to
+// reload, and every remaining write (the autosave interval, the pagehide/visibility
+// teardown save in PixiReadout) must be refused — otherwise a teardown save races in
+// and re-creates the record we just deleted.
+let resetInProgress = false;
+
 function getDb(): Promise<IDBDatabase> {
   dbPromise ??= openDbWithRetry().catch((error: unknown) => {
     dbPromise = null; // let the next caller retry instead of caching a rejected promise
@@ -74,6 +80,7 @@ export async function loadSavedWorld(): Promise<SavedWorld | null> {
 // tab, an old service-worker-pinned bundle, a fresh world racing a real save — and
 // skipping beats clobbering real progress.
 export async function writeSavedWorld(saved: SavedWorld): Promise<void> {
+  if (resetInProgress) return;
   const db = await getDb();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
@@ -161,4 +168,33 @@ export function ensurePersistentStorage(): void {
     },
     () => {},
   );
+}
+
+// Wipe all persisted state: the IndexedDB world record and the localStorage
+// breadcrumb. Flips resetInProgress first so any in-flight or teardown save is refused
+// (see writeSavedWorld), then closes the long-lived connection so deleteDatabase isn't
+// blocked by it. Intended to be followed immediately by a page reload.
+export async function resetSave(): Promise<void> {
+  resetInProgress = true;
+
+  try {
+    localStorage.removeItem(BREADCRUMB_KEY);
+  } catch {
+    // storage may be unavailable — dropping the world payload below is what matters
+  }
+
+  if (dbPromise !== null) {
+    const db = await dbPromise.catch(() => null);
+    db?.close();
+    dbPromise = null;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(DB_NAME);
+    req.onsuccess = (): void => resolve();
+    req.onerror = (): void => reject(req.error ?? new Error("indexedDB delete failed"));
+    // Another tab still holds the DB open: deletion is deferred until it closes, but
+    // this tab's record is already gone from that tab's perspective. Reload anyway.
+    req.onblocked = (): void => resolve();
+  });
 }
