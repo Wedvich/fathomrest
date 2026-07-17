@@ -6,56 +6,37 @@ pick up next".
 
 ## Done last session
 
-**Adversarial review of the pool-refactor commit (8293414) + fixes.** Eight verified
-findings, all fixed:
+**Buildable converters + the first refinement tier (iron-ore → iron-ingot). Two commits.**
 
-- `serialize.ts` pool-invariant check: the NUL-joined pair-key `Set` embedded a literal NUL
-  byte in source (git classified the file as binary — unreviewable diffs) and wasn't
-  collision-proof anyway. Replaced with a nested `Map<island, Set<resource>>` — no joined
-  key at all. File is text again; the commit boundary itself still diffs as `Bin` because
-  the pre-fix blob is binary, but everything after is textual.
-- `addWarehouse`/`addDeposit` now reject an empty resource tag — previously a command-legal
-  state failed its own import round-trip (`checkTag`) and got quarantined. `resource.ts`'s
-  "enforced at the command boundary" claim is now true.
-- `islandWarehouse`: dropped the stale islandPayers "table order keeps replay bit-identical"
-  comment; direct `values()` loop + early return (no closure on the frame path via
-  `canAffordBuild`). Deliberately **no** (island, resource) index in `SimState` — conflicts
-  with "state shape IS the serialization shape" and the perf doc's don't-optimize-unprofiled
-  rule; revisit if a profile flags it.
-- Extracted `availableForBuild` shared by `debitCost` + `canAffordBuild`, restoring the
-  can't-drift guarantee the deleted `islandPayers` comment promised.
-- v1 migration: the island backfill now collides with the pool invariant for any routed v1
-  save (route endpoints share a resource) → quarantine under the blessed pre-pool reset;
-  ADR-0001's "preserves idle progress" sentence corrected, behavior pinned by a test.
-- New coverage: two extractors on one pool fill it at the summed rate (the refactor's
-  headline behavior — previously an `inflow = rate` regression would have passed the suite),
-  plus empty-tag command-boundary rejections.
-
-`typecheck | lint | format | test` green (90 tests).
+- **Commit 1 (engine, `247be49`):** `buildConverter` fronting `addConverter`, mirroring
+  `buildExtractor` — validate → advance → `debitCost` from the shared island pool → place →
+  `deriveAll`, atomically at `t`. Adds a single-island assertion (both endpoints must share
+  an island, checked before any mutation) and charges the cost against that island's pool.
+  Extracted `checkConverterWiring` shared by `addConverter`/`buildConverter`. No save-version
+  bump. Two scenario tests (debit-and-wire happy path; cross-island rejection is atomic).
+- **Commit 2 (content, `03bbf79`):** iron-ore worked by two cost-gated deposits, refined to
+  iron-ingot by the converter — iron-ore extractor and refinery both paid in wood/stone.
+  New `ConverterSite` envelope model (built-state derived from a live converter's (src, dst)
+  pair via `isConverterBuilt`); `buildConverter` world wrapper; a `PixiReadout` build button
+  mirroring the deposit buttons. First real `WORLD_UPGRADES` step (v1→v2 injects the iron
+  tier into pre-iron saves) + `WORLD_CONTENT_VERSION` bump. DESIGN.md updated (refinement no
+  longer "deferred"). Live UI driven end-to-end (build button flips, stock debits, iron-ore
+  extractor gates correctly); `typecheck | lint | format | build | test` green (96 tests).
 
 ## Next session
 
-**Focus: single island first. Inter-island work is deferred** — including buildable
-routes, since a same-resource route is now inter-island by construction (one pool per
-island per resource). Routes as a mechanic already work (`addRoute`, solver, DAG
-constraint); only the buildable/costed wrapper is missing, and that waits until we
-take on island networking.
+**Focus stays single-island. Inter-island (buildable routes) still deferred.**
 
-1. **Buildable converters + refinement** (one increment, two commits) — a converter
-   changes resource *type*, so it's meaningless until there's a refined resource to
-   produce; the mechanism and the content ship together. Converters are single-island
-   (both endpoints on one island), so they're the on-island consumer that keeps built
-   pools from capping out and jamming. (`buildRoute` deferred with the rest of inter-island.)
-   - **Commit 1 (engine):** `buildConverter` fronting `addConverter`, mirroring
-     `buildExtractor` (debit `cost` from the shared island pool, then place, atomically at
-     `t`; assert src/dst share an island). Add a scenario test. No save-version bump.
-   - **Commit 2 (content):** re-introduce refinement as a tier on wood/stone — a refined
-     resource B, its pool wired into `createDemoWorld`, the converter recipe (`ratio`/`cap`
-     defaults). Ships as the first new `WORLD_UPGRADES` step + save-version bump per the
-     standing rule.
+1. **Refinery affordability tuning (small, flagged during the UI drive):** the refinery is
+   affordable at t=0 from the 30/30 starting stock (costs 20 wood + 20 stone), so it can be
+   built before any iron-ore extractor exists — the "gates behind a base-economy surplus"
+   intent only bites on the *second* iron build. If we want the refinery itself gated, raise
+   its cost or require iron-ore in the recipe. Placeholder tuning — playtest territory.
 2. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
    authored constants today. A placeable storage building that raises a pool's capacity is the
    "pool + capacity buildings" model the grill settled on — fold into the costed-builds layer.
+   Now more pressing: with the refinery capping iron-ingot at 100 and no on-island sink beyond
+   it, the ingot pool jams — capacity/consumption is the next real depth lever.
 3. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency.
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
@@ -67,8 +48,9 @@ rebuild `packages/app/dist/` before serving it anywhere.
 Engine follow-ups (do when they start to matter):
 
 - `removeExtractor` / `removeRoute` / `removeConverter` (entity deletion generally) — needed
-  once the UI lets players tear down structures. One table-deletion function per module and a
-  `deriveAll` after.
+  once the UI lets players tear down structures. Converters are now buildable, so a
+  `removeConverter` is the first one players will reach for. One table-deletion function per
+  module and a `deriveAll` after.
 - Multi-input (Leontief) recipes (`iron + coal → steel`) are **explicitly deferred**: they
   turn 2-endpoint edges into fixed-proportion nodes and break the clean ≤ 2·N sweep proof.
   ADR-first effort, only after single-input refinement is proven in play.
