@@ -46,19 +46,29 @@ Nine verified findings (six confirmed, three plausible); eight fixed, one skippe
 session** — the PixiReadout button refactor is typechecked and built but the buttons
 haven't been clicked in a browser since the dedup; worth a quick drive next session.
 
+## Done this session
+
+**UI drive of the refactored build buttons — done + verified.** Confirmed the extractor and
+refinery build buttons flip/disable correctly in the live app, and that the refinery stays
+disabled at t=0 until the base economy accumulates 40/40. Closes the "not live-driven"
+gap left by the PixiReadout button refactor.
+
 ## Next session
 
 **Focus stays single-island. Inter-island (buildable routes) still deferred.**
 
-1. **Quick UI drive:** confirm the refactored build buttons (extractor + refinery) still
-   flip/disable correctly in the live app, and that the refinery is disabled at t=0 until
-   the base economy accumulates 40/40.
-2. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
+1. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
    authored constants today. A placeable storage building that raises a pool's capacity is the
    "pool + capacity buildings" model the grill settled on — fold into the costed-builds layer.
    Now more pressing: with the refinery capping iron-ingot at 100 and no on-island sink beyond
    it, the ingot pool jams — capacity/consumption is the next real depth lever.
-3. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency.
+2. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge
+   as the first global-scoped resource (global capped pool, observatory extractor on a
+   knowledge deposit) → timed research queue (depth 2, paid at enqueue) → thin unlock tree.
+3. **Island XP + skill tree**: throughput-fed XP accumulator (own stored quantity), levels,
+   trunk + Extraction/Refinement branches; junction research-gated; nodes instant, paid in
+   island-local resources.
+4. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency.
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools. Pick up once single-island depth is proven.
