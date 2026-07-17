@@ -21,9 +21,11 @@ import {
   writeSavedWorld,
 } from "./persistence.ts";
 import {
+  buildConverter,
   buildExtractor,
   createDemoWorld,
   type DemoWorld,
+  isConverterBuilt,
   isExtractorBuilt,
   restoreWorld,
   type SavedWorld,
@@ -325,6 +327,40 @@ export function PixiReadout(): React.JSX.Element {
               el.textContent = isBuilt
                 ? `${dep.label} — extractor built`
                 : `Build extractor · ${dep.label} (${costLabel})`;
+            }
+            if (enabled !== lastEnabled) {
+              lastEnabled = enabled;
+              el.disabled = !enabled;
+            }
+          },
+        });
+      }
+
+      // One build button per converter site, mirroring the deposit buttons: the refinery is
+      // charged from its source pool's island (both pools share one — buildConverter is
+      // single-island). Caches its cost Map + island once (frame loop must not allocate) and
+      // rewrites its own label/disabled only when the underlying state changes.
+      for (const site of world.converterSites) {
+        const el = document.createElement("button");
+        el.type = "button";
+        const costMap = new Map<ResourceType, number>(site.cost);
+        const island: IslandId = getWarehouse(world.state, site.srcWarehouseId).islandId;
+        const costLabel = site.cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
+        el.addEventListener("click", () => {
+          if (buildConverter(world, site, epochAtStart + clock.now())) requestSave?.();
+        });
+        controls.appendChild(el);
+        let lastBuilt: boolean | null = null;
+        let lastEnabled: boolean | null = null;
+        buttons.push({
+          update: (t): void => {
+            const isBuilt = isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId);
+            const enabled = !isBuilt && canAffordBuild(world.state, t, island, costMap);
+            if (isBuilt !== lastBuilt) {
+              lastBuilt = isBuilt;
+              el.textContent = isBuilt
+                ? `${site.label} — built`
+                : `Build refinery · ${site.label} (${costLabel})`;
             }
             if (enabled !== lastEnabled) {
               lastEnabled = enabled;

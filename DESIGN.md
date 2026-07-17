@@ -149,11 +149,15 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
 
 - 1 starting island + 2–3 discoverable islands
 - ~8 resources, one refinement tier. **Tier-0 base is wood + stone** — the bootstrap starts
-  with a seeded stockpile and no extractors; deposits are worked by cost-gated builds.
-  Refinement (an ore→ingot-style tier) is deferred, to be layered on the base later.
+  with a seeded stockpile and no extractors; deposits are worked by cost-gated builds. The
+  refinement tier is now layered on top: **iron-ore → iron-ingot** via a single-island
+  buildable converter (`buildConverter`), the iron-ore extractor and the refinery both paid
+  in wood/stone so the tier gates behind a base-economy surplus.
 - **Building bootstrap** — the early game is building extractors: cross-resource costs
   (a wood extractor is paid in stone and vice versa) gate later builds behind accumulation.
-  Extends to buildable/costed routes and converters through the same layer (next increment).
+  Now extends to buildable/costed converters (the iron refinery) through the same layer;
+  buildable/costed routes wait for inter-island work (a same-resource route is inter-island
+  by construction under the one-pool invariant).
 - ~20-node research tree with one exclusive island-specialization junction
 - Expeditions with outfitting + one mid-voyage decision point
 - Warehouses, caps, transport routes
@@ -163,7 +167,8 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
 ## Open items
 
 - Name; concrete resource/biome list (vertical slice forces these). Tier-0 base settled as
-  wood + stone; the rest of the ~8-resource set and the refinement tier are still open.
+  wood + stone and the first refinement tier as iron-ore → iron-ingot; the rest of the
+  ~8-resource set is still open.
 - Asset-generation tooling.
 - Tuning constants: depletion curves, cap sizes — playtest territory, under the
   tight-caps pacing principle (core loop, idle half).

@@ -1,12 +1,26 @@
-import { advance, warehouseAmountAt } from "@fathomrest/core";
+import {
+  addDeposit,
+  addWarehouse,
+  advance,
+  createSimState,
+  grantResource,
+  islandId,
+  resourceType,
+  type ResourceType,
+  serializeState,
+  warehouseAmountAt,
+} from "@fathomrest/core";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildConverter,
   buildExtractor,
   createDemoWorld,
   type DemoWorld,
+  isConverterBuilt,
   isExtractorBuilt,
   restoreWorld,
+  type SavedWorld,
   snapshotWorld,
   WORLD_CONTENT_VERSION,
 } from "./world.ts";
@@ -106,8 +120,8 @@ describe("wood/stone build bootstrap", () => {
   });
 });
 
-// The content-version framework is retained (WORLD_UPGRADES is empty after the pivot) plus the
-// one-time reset that discards pre-pivot ore/ingot saves. Real app restore path, no mocks.
+// The content-version framework plus the one-time reset that discards pre-pivot ore/ingot
+// saves. Real app restore path, no mocks.
 describe("restore versioning and the one-time reset", () => {
   it("rejects a legacy ore/ingot envelope so the caller quarantines it", () => {
     // Pre-pivot saves carried a singular `buildSite`; the wood/stone envelope never does, so
@@ -146,5 +160,128 @@ describe("restore versioning and the one-time reset", () => {
 
     expect(restored.deposits).toEqual(saved.deposits);
     expect(snapshotWorld(restored).contentVersion).toBe(99);
+  });
+});
+
+// A pre-iron (contentVersion 1) envelope as the wood/stone-only app wrote it: wood + stone pools
+// and their four deposits, no iron tier, no converterSites. Built through the core surface so the
+// upgrade step restores against a genuine older save rather than a doctored fresh one.
+function woodStoneV1Save(): SavedWorld {
+  const state = createSimState(1, 0);
+  const home = islandId("home");
+  const wood = resourceType("wood");
+  const stone = resourceType("stone");
+  const woodPool = addWarehouse(state, 0, wood, home, 100);
+  const stonePool = addWarehouse(state, 0, stone, home, 100);
+  const woodCost: readonly (readonly [ResourceType, number])[] = [[stone, 20]];
+  const stoneCost: readonly (readonly [ResourceType, number])[] = [[wood, 20]];
+  const vein = (
+    resource: ResourceType,
+    warehouseId: ReturnType<typeof addWarehouse>,
+    label: string,
+    cost: readonly (readonly [ResourceType, number])[],
+  ) => ({
+    id: addDeposit(state, 0, resource, [{ amount: 500, multiplier: 2 }], 0.5),
+    warehouseId,
+    label,
+    resource,
+    cost,
+    rate: 1,
+  });
+  const deposits = [
+    vein(wood, woodPool, "Wood A vein", woodCost),
+    vein(wood, woodPool, "Wood B vein", woodCost),
+    vein(stone, stonePool, "Stone A vein", stoneCost),
+    vein(stone, stonePool, "Stone B vein", stoneCost),
+  ];
+  grantResource(state, 0, woodPool, 30);
+  grantResource(state, 0, stonePool, 30);
+  state.wallTime = 0;
+  return {
+    doc: serializeState(state),
+    warehouses: [
+      { id: woodPool, label: "Wood" },
+      { id: stonePool, label: "Stone" },
+    ],
+    deposits,
+    contentVersion: 1,
+  };
+}
+
+// The iron refinement tier as scenarios: a fresh world exposes it, the extractor->refinery chain
+// refines iron-ore into iron-ingot, and it survives the restore path. Drives the real core
+// commands through the world layer, no mocks.
+describe("iron refinement tier", () => {
+  const ironOre = resourceType("iron-ore");
+
+  function poolId(world: DemoWorld, label: string): ReturnType<typeof addWarehouse> {
+    const warehouse = world.warehouses.find((w) => w.label === label);
+    if (!warehouse) throw new Error(`no warehouse labelled ${label}`);
+    return warehouse.id;
+  }
+
+  it("a fresh world offers iron-ore deposits, iron pools, and a refinery site", () => {
+    const world = createDemoWorld(1, 0);
+    expect(world.warehouses.map((w) => w.label)).toEqual([
+      "Wood",
+      "Stone",
+      "Iron Ore",
+      "Iron Ingot",
+    ]);
+    expect(world.deposits.filter((d) => d.resource === ironOre)).toHaveLength(2);
+    expect(world.converterSites).toHaveLength(1);
+  });
+
+  it("builds the chain: extractor feeds ore, refinery refines it at draw·ratio", () => {
+    const world = createDemoWorld(1, 0);
+    const ironOrePool = poolId(world, "Iron Ore");
+    const ironIngotPool = poolId(world, "Iron Ingot");
+    const oreVein = world.deposits.find((d) => d.label === "Iron Ore A vein");
+    const [site] = world.converterSites;
+    if (!oreVein || !site) throw new Error("iron content missing");
+    // Both iron builds cost 20 wood + 20 stone; grant a surplus so the tier isn't gated by the
+    // wood/stone economy here (that gating is covered by the bootstrap scenarios above).
+    grantResource(world.state, 0, poolId(world, "Wood"), 100);
+    grantResource(world.state, 0, poolId(world, "Stone"), 100);
+    expect(buildExtractor(world, oreVein.id, 0)).toBe(true); // iron-ore now +2/s
+    // 20 iron-ore by t=10; build the refinery then — cap 2/s, ratio 0.5 -> 1 ingot/s.
+    expect(warehouseAmountAt(world.state, ironOrePool, 10)).toBeCloseTo(20, 9);
+    expect(buildConverter(world, site, 10)).toBe(true);
+    // t=20: 1 ingot/s for 10s; iron-ore holds at 20 (2 produced - 2 drawn per second).
+    expect(warehouseAmountAt(world.state, ironIngotPool, 20)).toBeCloseTo(10, 9);
+    expect(warehouseAmountAt(world.state, ironOrePool, 20)).toBeCloseTo(20, 9);
+  });
+
+  it("is idempotent per refinery and survives a save round-trip", () => {
+    const world = createDemoWorld(1, 0);
+    const [site] = world.converterSites;
+    if (!site) throw new Error("iron refinery site missing");
+    grantResource(world.state, 0, poolId(world, "Wood"), 100);
+    grantResource(world.state, 0, poolId(world, "Stone"), 100);
+    expect(buildConverter(world, site, 0)).toBe(true);
+    expect(buildConverter(world, site, 5)).toBe(false); // already built
+    world.state.wallTime = 0;
+
+    const restored = restoreWorld(structuredClone(snapshotWorld(world)), 0);
+    expect(isConverterBuilt(restored, site.srcWarehouseId, site.dstWarehouseId)).toBe(true);
+    expect(restored.converterSites).toEqual(world.converterSites);
+  });
+});
+
+describe("iron-tier content upgrade", () => {
+  it("layers the iron tier onto a pre-iron (v1) wood/stone save", () => {
+    const restored = restoreWorld(woodStoneV1Save(), 0);
+    // Raised to current and the iron content injected through the same commands as a fresh world.
+    expect(snapshotWorld(restored).contentVersion).toBe(WORLD_CONTENT_VERSION);
+    expect(restored.warehouses.map((w) => w.label)).toEqual([
+      "Wood",
+      "Stone",
+      "Iron Ore",
+      "Iron Ingot",
+    ]);
+    expect(restored.deposits.filter((d) => d.resource === resourceType("iron-ore"))).toHaveLength(
+      2,
+    );
+    expect(restored.converterSites).toHaveLength(1);
   });
 });

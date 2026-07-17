@@ -2,9 +2,11 @@ import {
   addDeposit,
   addWarehouse,
   advance,
+  buildConverter as buildConverterCmd,
   buildExtractor as buildExtractorCmd,
   createSimState,
   deserializeState,
+  forEachConverter,
   forEachExtractor,
   grantResource,
   offlineElapsedSeconds,
@@ -12,6 +14,7 @@ import {
   resourceType,
   serializeState,
   type Id,
+  type IslandId,
   type ResourceType,
   type SaveDocument,
   type SimState,
@@ -24,6 +27,7 @@ export interface DemoWorld {
   state: SimState;
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly Deposit[];
+  converterSites: readonly ConverterSite[];
   // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or
   // an upgraded restore, higher when a newer app wrote the loaded save. snapshotWorld
   // stamps this (never a lower constant), so a stale service-worker-pinned bundle can't
@@ -47,13 +51,33 @@ export interface Deposit {
   readonly rate: number;
 }
 
+// A buildable converter (refinement recipe) and everything the app needs to offer it as a
+// build site: the source pool it draws from, the destination pool it fills with the refined
+// type, the build price, and the converter's own cap/ratio. Unlike a Deposit, no core id is
+// carried — the converter doesn't exist until built; "built" is re-derived by matching a live
+// converter's (src, dst) pair (isConverterBuilt), so it survives a save round-trip without a
+// flag. Both pools sit on one island (buildConverter is single-island), which is the island
+// the cost is charged against. `cost` is serializable entries matching the core cost vector.
+export interface ConverterSite {
+  readonly srcWarehouseId: Id;
+  readonly dstWarehouseId: Id;
+  readonly label: string;
+  readonly cost: readonly (readonly [ResourceType, number])[];
+  readonly cap: number;
+  readonly ratio: number;
+}
+
 // App-level save envelope: the canonical core document plus the UI view model (warehouse
-// labels, deposit build-sites) the core doesn't carry. Persisted as-is (persistence.ts). Kept
-// separate from the core SaveDocument so the sim's serialization never depends on presentation.
+// labels, deposit build-sites, converter build-sites) the core doesn't carry. Persisted as-is
+// (persistence.ts). Kept separate from the core SaveDocument so the sim's serialization never
+// depends on presentation.
 export interface SavedWorld {
   doc: SaveDocument;
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly Deposit[];
+  // Absent on a pre-iron-tier save (contentVersion 1); restoreWorld defaults it to [] before
+  // the upgrade step injects the iron refinery.
+  converterSites?: readonly ConverterSite[];
   // App content revision this envelope was written at. Absent on a pre-versioning save
   // (treated as 1). Bumped whenever a WORLD_UPGRADES step is added, so restoreWorld can
   // raise older saves to current.
@@ -65,59 +89,114 @@ const WAREHOUSE_CAP = 100;
 const STARTING_STOCK = 30; // seeded into each resource's pool at t=0
 const BUILD_COST = 20; // paid in the *other* resource
 
+// Demo world resources and its single starting island — module-level so createDemoWorld and
+// the iron-tier upgrade step build identical content from one source.
+const HOME: IslandId = islandId("home");
+const WOOD = resourceType("wood");
+const STONE = resourceType("stone");
+const IRON_ORE = resourceType("iron-ore");
+const IRON_INGOT = resourceType("iron-ingot");
+// Iron refinery tuning (placeholder, DESIGN.md vertical slice): draws CONVERTER_CAP iron-ore/s
+// and produces CONVERTER_RATIO iron-ingot per iron-ore.
+const CONVERTER_CAP = 2;
+const CONVERTER_RATIO = 0.5;
+
+// The rich vein every demo deposit shares: a 500-unit tier at ×2 depleting to a 0.5 perpetual
+// floor (mirrors the earlier placeholder).
+function addDemoDeposit(
+  state: SimState,
+  t: number,
+  resource: ResourceType,
+  warehouseId: Id,
+  label: string,
+  cost: readonly (readonly [ResourceType, number])[],
+): Deposit {
+  const id = addDeposit(state, t, resource, [{ amount: 500, multiplier: 2 }], 0.5);
+  return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
+}
+
+// The iron refinement tier layered on the wood/stone base: an iron-ore pool worked by two
+// cost-gated deposits, an iron-ingot pool, and a refinery converter site (iron-ore -> iron-ingot,
+// paid in wood/stone). Built at epoch t through the core surface and returned as envelope view
+// models. Shared by createDemoWorld (t=0) and the v1->v2 upgrade step, so a fresh world and an
+// upgraded save get identical iron content.
+function addIronTier(
+  state: SimState,
+  t: number,
+): {
+  warehouses: { id: Id; label: string }[];
+  deposits: Deposit[];
+  converterSites: ConverterSite[];
+} {
+  const ironOrePool = addWarehouse(state, t, IRON_ORE, HOME, WAREHOUSE_CAP);
+  const ironIngotPool = addWarehouse(state, t, IRON_INGOT, HOME, WAREHOUSE_CAP);
+  // Iron-ore extractors and the refinery are both paid in wood/stone, gating the tier behind
+  // the base economy (the player must have a wood/stone surplus before refining begins).
+  const ironCost: readonly (readonly [ResourceType, number])[] = [
+    [WOOD, BUILD_COST],
+    [STONE, BUILD_COST],
+  ];
+  return {
+    warehouses: [
+      { id: ironOrePool, label: "Iron Ore" },
+      { id: ironIngotPool, label: "Iron Ingot" },
+    ],
+    deposits: [
+      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore A vein", ironCost),
+      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore B vein", ironCost),
+    ],
+    converterSites: [
+      {
+        srcWarehouseId: ironOrePool,
+        dstWarehouseId: ironIngotPool,
+        label: "Iron Refinery",
+        cost: ironCost,
+        cap: CONVERTER_CAP,
+        ratio: CONVERTER_RATIO,
+      },
+    ],
+  };
+}
+
 export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const state = createSimState(seed, wallTimeMs);
-
-  // Tier-0 economy: wood and stone. Refinement (an ore->ingot tier) is deferred — it returns
-  // later as a tier layered on these, per DESIGN.md.
-  const wood = resourceType("wood");
-  const stone = resourceType("stone");
-  // Single starting island: every warehouse shares it, so a build spends only local stock.
-  const home = islandId("home");
 
   // Cross-dependency: a wood extractor is paid in stone and vice versa, so the first builds
   // spend the starting stockpile and later ones must wait for the extractors already running
   // to replenish it. All numbers here are placeholder tuning (DESIGN.md vertical slice).
-  const woodCost: readonly (readonly [ResourceType, number])[] = [[stone, BUILD_COST]];
-  const stoneCost: readonly (readonly [ResourceType, number])[] = [[wood, BUILD_COST]];
+  const woodCost: readonly (readonly [ResourceType, number])[] = [[STONE, BUILD_COST]];
+  const stoneCost: readonly (readonly [ResourceType, number])[] = [[WOOD, BUILD_COST]];
 
   // One pool per (island, resource) — a single Wood pool and a single Stone pool (core
   // invariant, sim.ts addWarehouse). Every extractor of a resource feeds its one pool, so two
   // wood veins make the Wood bar fill twice as fast rather than filling two separate bars.
-  const woodPool = addWarehouse(state, 0, wood, home, WAREHOUSE_CAP);
-  const stonePool = addWarehouse(state, 0, stone, home, WAREHOUSE_CAP);
-
-  const makeDeposit = (
-    resource: ResourceType,
-    warehouseId: Id,
-    label: string,
-    cost: readonly (readonly [ResourceType, number])[],
-  ): Deposit => {
-    // Rich vein depleting to a lean perpetual floor (mirrors the earlier placeholder).
-    const id = addDeposit(state, 0, resource, [{ amount: 500, multiplier: 2 }], 0.5);
-    return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
-  };
+  const woodPool = addWarehouse(state, 0, WOOD, HOME, WAREHOUSE_CAP);
+  const stonePool = addWarehouse(state, 0, STONE, HOME, WAREHOUSE_CAP);
 
   // Two deposits per resource, all unworked (no extractor), each feeding its resource's shared
   // pool. Building the first of each is affordable from the starting stockpile; the others gate
   // behind accumulation.
-  const woodA = makeDeposit(wood, woodPool, "Wood A vein", woodCost);
-  const woodB = makeDeposit(wood, woodPool, "Wood B vein", woodCost);
-  const stoneA = makeDeposit(stone, stonePool, "Stone A vein", stoneCost);
-  const stoneB = makeDeposit(stone, stonePool, "Stone B vein", stoneCost);
+  const woodA = addDemoDeposit(state, 0, WOOD, woodPool, "Wood A vein", woodCost);
+  const woodB = addDemoDeposit(state, 0, WOOD, woodPool, "Wood B vein", woodCost);
+  const stoneA = addDemoDeposit(state, 0, STONE, stonePool, "Stone A vein", stoneCost);
+  const stoneB = addDemoDeposit(state, 0, STONE, stonePool, "Stone B vein", stoneCost);
 
   // Starting stockpile: enough to build one wood + one stone extractor (BUILD_COST each),
   // leaving a remainder the next builds must wait for the new extractors to top back up.
   grantResource(state, 0, woodPool, STARTING_STOCK);
   grantResource(state, 0, stonePool, STARTING_STOCK);
 
+  const iron = addIronTier(state, 0);
+
   return {
     state,
     warehouses: [
       { id: woodPool, label: "Wood" },
       { id: stonePool, label: "Stone" },
+      ...iron.warehouses,
     ],
-    deposits: [woodA, woodB, stoneA, stoneB],
+    deposits: [woodA, woodB, stoneA, stoneB, ...iron.deposits],
+    converterSites: iron.converterSites,
     contentVersion: WORLD_CONTENT_VERSION,
   };
 }
@@ -126,10 +205,21 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
 // index+2 using core commands at the current epoch, and appends any new envelope view models
 // the core doesn't carry. restoreWorld gates them by contentVersion. WORLD_CONTENT_VERSION is
 // derived from the list — adding a step bumps the version by construction, and createDemoWorld
-// builds at the current version already. The list is empty after the wood/stone pivot (the old
-// ore/ingot upgrade step targeted a world that no longer exists); the next demo-world content
-// change adds the first new step.
-const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = [];
+// builds at the current version already.
+const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = [
+  // v1 -> v2: layer the iron refinement tier onto a pre-iron wood/stone save. Injected through
+  // the same core commands createDemoWorld uses, at the restore-time epoch, so the new pools and
+  // deposits never retroactively produce across the offline gap.
+  (world, t): DemoWorld => {
+    const iron = addIronTier(world.state, t);
+    return {
+      ...world,
+      warehouses: [...world.warehouses, ...iron.warehouses],
+      deposits: [...world.deposits, ...iron.deposits],
+      converterSites: [...world.converterSites, ...iron.converterSites],
+    };
+  },
+];
 export const WORLD_CONTENT_VERSION = WORLD_UPGRADES.length + 1;
 
 export function snapshotWorld(world: DemoWorld): SavedWorld {
@@ -137,6 +227,7 @@ export function snapshotWorld(world: DemoWorld): SavedWorld {
     doc: serializeState(world.state),
     warehouses: world.warehouses,
     deposits: world.deposits,
+    converterSites: world.converterSites,
     contentVersion: world.contentVersion,
   };
 }
@@ -147,6 +238,16 @@ export function isExtractorBuilt(world: DemoWorld, depositId: Id): boolean {
   let built = false;
   forEachExtractor(world.state, (_id, extractor) => {
     if (extractor.depositId === depositId) built = true;
+  });
+  return built;
+}
+
+// Whether the refinery on this (src, dst) pool pair has already been built — source of truth is
+// a live converter in core state, so it survives a save round-trip without a flag.
+export function isConverterBuilt(world: DemoWorld, srcId: Id, dstId: Id): boolean {
+  let built = false;
+  forEachConverter(world.state, (_id, converter) => {
+    if (converter.srcId === srcId && converter.dstId === dstId) built = true;
   });
   return built;
 }
@@ -166,6 +267,28 @@ export function buildExtractor(world: DemoWorld, depositId: Id, t: number): bool
       deposit.rate,
       deposit.id,
       deposit.warehouseId,
+    );
+    return true;
+  } catch {
+    return false; // insufficient stock on the island — retry once resources have accrued
+  }
+}
+
+// Build the refinery converter for a site at sim time t, paying its cost from the island's stock
+// (core buildConverter advances to t, debits, then wires the converter, so refining begins at t).
+// Idempotent per (src, dst) pair; returns false if already built or the cost can't be met yet
+// (the UI disables the button until canAffordBuild — this is the backstop).
+export function buildConverter(world: DemoWorld, site: ConverterSite, t: number): boolean {
+  if (isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId)) return false;
+  try {
+    buildConverterCmd(
+      world.state,
+      t,
+      new Map(site.cost),
+      site.srcWarehouseId,
+      site.dstWarehouseId,
+      site.cap,
+      site.ratio,
     );
     return true;
   } catch {
@@ -198,6 +321,7 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
     state,
     warehouses: saved.warehouses,
     deposits: saved.deposits,
+    converterSites: saved.converterSites ?? [], // absent on a pre-iron-tier (v1) save
     // max: a save from a newer app keeps its higher version, so re-saving on this stale
     // bundle never downgrades it into re-running the newer app's steps later.
     contentVersion: Math.max(savedVersion, WORLD_CONTENT_VERSION),
