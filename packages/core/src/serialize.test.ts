@@ -269,6 +269,21 @@ describe("serializer", () => {
     }
   });
 
+  it("rejects a routed v1 save: the island backfill collides with the pool invariant", () => {
+    const doc = routeDoc();
+    const v1 = {
+      ...doc,
+      version: 1,
+      warehouses: doc.warehouses.map(([id, warehouse]) => {
+        const { islandId: _omit, ...rest } = warehouse;
+        return [id, rest];
+      }),
+    } as unknown as SaveDocument;
+    // Both route endpoints store one resource; backfilled onto the default island they violate
+    // the one-pool invariant, so the import rejects and the app quarantines (ADR-0001).
+    expect(() => deserializeState(v1)).toThrow(/duplicate/);
+  });
+
   it("rejects a warehouse with an empty island tag", () => {
     const doc = serializeState(midFlightState().state);
     const warehouses = doc.warehouses.map(([id, warehouse]): (typeof doc.warehouses)[number] => [

@@ -585,6 +585,9 @@ export function addWarehouse(
   island: IslandId,
   capacity: number,
 ): Id {
+  if (resource.length === 0) {
+    throw new Error("warehouse resource must be a non-empty tag");
+  }
   if (island.length === 0) {
     throw new Error("warehouse island must be a non-empty tag");
   }
@@ -630,6 +633,9 @@ export function addDeposit(
   tiers: readonly DepositTier[],
   floorMultiplier: number,
 ): Id {
+  if (resource.length === 0) {
+    throw new Error("deposit resource must be a non-empty tag");
+  }
   for (const tier of tiers) {
     if (!Number.isFinite(tier.amount) || !(tier.amount > 0)) {
       throw new Error(`deposit tier amount must be finite and > 0, got ${tier.amount}`);
@@ -688,20 +694,27 @@ export function addExtractor(
 
 // The single warehouse on `island` storing `resource`, or undefined if the island has none.
 // One per (island, resource) is a core invariant (addWarehouse, and the import boundary), so
-// this uniquely identifies the pool a build debits. Table order (forEachWarehouse) keeps
-// replay bit-identical (docs/browser-performance.md).
+// the first match is the only match. Direct values() loop with an early return — no callback
+// closure — because this sits on the frame path via canAffordBuild
+// (docs/browser-performance.md: the frame loop must not allocate).
 function islandWarehouse(
   state: SimState,
   island: IslandId,
   resource: ResourceType,
 ): Warehouse | undefined {
-  let found: Warehouse | undefined;
-  forEachWarehouse(state, (_id, warehouse) => {
+  for (const warehouse of state.warehouses.values()) {
     if (warehouse.islandId === island && warehouse.resource === resource) {
-      found = warehouse;
+      return warehouse;
     }
-  });
-  return found;
+  }
+  return undefined;
+}
+
+// Stock a build can draw on for one cost resource: the resolved pool's clamped amount at t,
+// or 0 when the island has no pool for it. Shared by debitCost (which spends it) and
+// canAffordBuild (which only checks), so the affordability rule and the debit can't drift.
+function availableForBuild(warehouse: Warehouse | undefined, t: number): number {
+  return warehouse === undefined ? 0 : clampedAmount(warehouse, t);
 }
 
 // Debit a build cost from one island's stock. Each cost resource maps to that island's single
@@ -724,7 +737,7 @@ function debitCost(
       continue;
     }
     const warehouse = islandWarehouse(state, island, resource);
-    const available = warehouse === undefined ? 0 : clampedAmount(warehouse, t);
+    const available = availableForBuild(warehouse, t);
     if (warehouse === undefined || available < amount) {
       throw new Error(
         `insufficient ${resource} on island ${island}: need ${amount}, have ${available}`,
@@ -743,8 +756,9 @@ function debitCost(
 // Read-only affordability check mirroring debitCost's whole-vector precondition: true iff
 // every resource in `cost` is fully covered by stock on `island` at t. Advances and mutates
 // nothing — callers (the build UI) advance to t first, same query contract as
-// warehouseAmountAt. Reads the same per-resource island pool as debitCost (islandWarehouse),
-// so a button that reports "affordable" can never be refused by the subsequent build.
+// warehouseAmountAt. Shares debitCost's pool resolution and availability rule (islandWarehouse
+// + availableForBuild), so a button that reports "affordable" can never be refused by the
+// subsequent build.
 export function canAffordBuild(
   state: SimState,
   t: number,
@@ -758,8 +772,7 @@ export function canAffordBuild(
     if (amount === 0) {
       continue;
     }
-    const warehouse = islandWarehouse(state, island, resource);
-    if (warehouse === undefined || clampedAmount(warehouse, t) < amount) {
+    if (availableForBuild(islandWarehouse(state, island, resource), t) < amount) {
       return false;
     }
   }

@@ -421,6 +421,25 @@ describe("one pool per island per resource", () => {
     addWarehouse(state, 0, resourceType("other"), I, 100);
     addWarehouse(state, 0, R, J, 100);
   });
+
+  it("sums multiple extractors of a resource into the island's single pool", () => {
+    const state = createSimState(1, 0);
+    const pool = addWarehouse(state, 0, R, I, 1_000);
+    // Two veins, one pool: rates add (4 + 2), the one bar fills faster instead of forking.
+    const veinA = addDeposit(state, 0, R, [], 1);
+    const veinB = addDeposit(state, 0, R, [], 1);
+    addExtractor(state, 0, 4, veinA, pool);
+    addExtractor(state, 0, 2, veinB, pool);
+    advance(state, 10);
+    expect(warehouseAmountAt(state, pool, 10)).toBeCloseTo(60, 9);
+  });
+
+  it("rejects an empty resource tag at the command boundary", () => {
+    const state = createSimState(1, 0);
+    // Mirrors the import boundary's checkTag: a state the core accepts must round-trip.
+    expect(() => addWarehouse(state, 0, resourceType(""), I, 100)).toThrow(/resource/);
+    expect(() => addDeposit(state, 0, resourceType(""), [], 1)).toThrow(/resource/);
+  });
 });
 
 describe("resource-costed building", () => {

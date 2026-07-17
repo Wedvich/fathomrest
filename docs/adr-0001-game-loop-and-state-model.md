@@ -210,9 +210,12 @@ identical state. The only irreplaceable data is player input. Therefore:
   a single pool (`islandWarehouse`) rather than spreading across several. The invariant is a
   structural equality check, not a closed-form input, so like the tag itself it sits outside
   the litmus concerns. Adding the field to `Warehouse` is an incompatible save-schema
-  change, so `SAVE_VERSION` was bumped (§8); rather than discard existing saves,
-  `deserializeState` forward-migrates a v1 document by backfilling a default island tag, so a
-  routine schema bump preserves idle progress instead of resetting players to epoch 0.
+  change, so `SAVE_VERSION` was bumped (§8); `deserializeState` forward-migrates a v1
+  document by backfilling a default island tag. Since the pool invariant landed, that
+  backfill puts every v1 warehouse on one island, so a v1 save with two same-resource
+  warehouses (any save with a route — endpoints share a resource) fails the import re-check
+  and is quarantined, covered by DESIGN.md's blessed pre-pool reset; only route-free v1
+  saves still migrate through.
 
 ## Consequences
 
