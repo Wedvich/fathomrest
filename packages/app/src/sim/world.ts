@@ -56,6 +56,12 @@ export interface Deposit {
   readonly resource: ResourceType;
   readonly cost: readonly (readonly [ResourceType, number])[];
   readonly rate: number;
+  // The island whose stockpile funds building this deposit's extractor — the site's island. For a
+  // same-island pool this equals getWarehouse(warehouseId).islandId; it differs only when the output
+  // pool is global-scoped (a knowledge observatory sits on and is paid from home while filling the
+  // global knowledge pool). Always present at runtime; pre-knowledge saves lack it, so
+  // restoreWorld backfills it from the pool (SavedDeposit).
+  readonly payIslandId: IslandId;
 }
 
 // A buildable converter (refinement recipe) and everything the app needs to offer it as a
@@ -76,6 +82,10 @@ export interface ConverterSite {
   readonly ratio: number;
 }
 
+// Deposit as persisted: payIslandId is absent on pre-knowledge saves (it always equalled the
+// pool's island then), so restoreWorld backfills it before the world is built.
+export type SavedDeposit = Omit<Deposit, "payIslandId"> & { readonly payIslandId?: IslandId };
+
 // App-level save envelope: the canonical core document plus the UI view model (warehouse
 // labels, deposit build-sites, converter build-sites) the core doesn't carry. Persisted as-is
 // (persistence.ts). Kept separate from the core SaveDocument so the sim's serialization never
@@ -83,7 +93,7 @@ export interface ConverterSite {
 export interface SavedWorld {
   doc: SaveDocument;
   warehouses: readonly { id: Id; label: string }[];
-  deposits: readonly Deposit[];
+  deposits: readonly SavedDeposit[];
   // Absent on a pre-iron-tier save (contentVersion 1); restoreWorld defaults it to [] before
   // the upgrade step injects the iron refinery.
   converterSites?: readonly ConverterSite[];
@@ -114,6 +124,24 @@ const IRON_INGOT = resourceType("iron-ingot");
 // and produces CONVERTER_RATIO iron-ingot per iron-ore.
 const CONVERTER_CAP = 2;
 const CONVERTER_RATIO = 0.5;
+
+const KNOWLEDGE = resourceType("knowledge");
+// Knowledge is the first GLOBAL-scoped resource (DESIGN.md Progression/Knowledge): a single
+// shared pool with its own cap, not an island pool. It lives on a distinguished GLOBAL scope so
+// (a) future islands' observatories all feed one pool and (b) its cap stays out of the island
+// storage ladder — upgradeIslandCapacity is per-island; knowledge's cap is research-gated later.
+const GLOBAL: IslandId = islandId("global");
+const KNOWLEDGE_CAP = 100; // placeholder; raised by research later, never by the storage ladder
+// The tier-0 observatory is cost-gated only (wood/stone), above STARTING_STOCK like the iron
+// builds so the base economy must already be running (DESIGN.md: the bootstrap into research).
+const OBSERVATORY_COST = 40;
+
+// True for the distinguished global scope: its pools sit outside every per-island system —
+// the storage ladder today, island XP later. Island-enumerating features must filter through
+// this predicate rather than re-deriving the exclusion.
+export function isGlobalScope(island: IslandId): boolean {
+  return island === GLOBAL;
+}
 
 // One rung of the storage-upgrade ladder: raise a pool's capacity to `capacity` for `cost`.
 export interface StorageTier {
@@ -162,9 +190,10 @@ function addDemoDeposit(
   warehouseId: Id,
   label: string,
   cost: readonly (readonly [ResourceType, number])[],
+  payIslandId: IslandId,
 ): Deposit {
   const id = addDeposit(state, t, resource, [{ amount: 500, multiplier: 2 }], 0.5);
-  return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
+  return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE, payIslandId };
 }
 
 // The cap a NEW pool takes when a content step lands it on an existing island: the island's
@@ -208,8 +237,8 @@ function addIronTier(
       { id: ironIngotPool, label: "Iron Ingot" },
     ],
     deposits: [
-      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore A vein", ironCost),
-      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore B vein", ironCost),
+      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore A vein", ironCost, HOME),
+      addDemoDeposit(state, t, IRON_ORE, ironOrePool, "Iron Ore B vein", ironCost, HOME),
     ],
     converterSites: [
       {
@@ -220,6 +249,42 @@ function addIronTier(
         cap: CONVERTER_CAP,
         ratio: CONVERTER_RATIO,
       },
+    ],
+  };
+}
+
+// The knowledge tier layered on the wood/stone base (DESIGN.md Progression): a global-scoped
+// knowledge pool worked by a cost-gated observatory on the home island. Built through the core
+// surface at epoch t; shared by createDemoWorld (t=0) and the v2->v3 upgrade step so a fresh world
+// and an upgraded save get identical knowledge content. No converterSites — knowledge is extracted,
+// not refined (goods->knowledge labs are a later addition).
+function addKnowledgeTier(
+  state: SimState,
+  t: number,
+): {
+  warehouses: { id: Id; label: string }[];
+  deposits: Deposit[];
+} {
+  // The pool sits on GLOBAL with its own cap (not islandStorageCap): global scope is outside the
+  // island storage ladder, so it never seeds from or advances an island's rung.
+  const knowledgePool = addWarehouse(state, t, KNOWLEDGE, GLOBAL, KNOWLEDGE_CAP);
+  const observatoryCost: readonly (readonly [ResourceType, number])[] = [
+    [WOOD, OBSERVATORY_COST],
+    [STONE, OBSERVATORY_COST],
+  ];
+  // Site island is HOME (where the observatory is built and paid); the output pool is GLOBAL.
+  return {
+    warehouses: [{ id: knowledgePool, label: "Knowledge" }],
+    deposits: [
+      addDemoDeposit(
+        state,
+        t,
+        KNOWLEDGE,
+        knowledgePool,
+        "Knowledge deposit",
+        observatoryCost,
+        HOME,
+      ),
     ],
   };
 }
@@ -242,10 +307,10 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   // Two deposits per resource, all unworked (no extractor), each feeding its resource's shared
   // pool. Building the first of each is affordable from the starting stockpile; the others gate
   // behind accumulation.
-  const woodA = addDemoDeposit(state, 0, WOOD, woodPool, "Wood A vein", woodCost);
-  const woodB = addDemoDeposit(state, 0, WOOD, woodPool, "Wood B vein", woodCost);
-  const stoneA = addDemoDeposit(state, 0, STONE, stonePool, "Stone A vein", stoneCost);
-  const stoneB = addDemoDeposit(state, 0, STONE, stonePool, "Stone B vein", stoneCost);
+  const woodA = addDemoDeposit(state, 0, WOOD, woodPool, "Wood A vein", woodCost, HOME);
+  const woodB = addDemoDeposit(state, 0, WOOD, woodPool, "Wood B vein", woodCost, HOME);
+  const stoneA = addDemoDeposit(state, 0, STONE, stonePool, "Stone A vein", stoneCost, HOME);
+  const stoneB = addDemoDeposit(state, 0, STONE, stonePool, "Stone B vein", stoneCost, HOME);
 
   // Starting stockpile: enough to build one wood + one stone extractor (BUILD_COST each),
   // leaving a remainder the next builds must wait for the new extractors to top back up.
@@ -253,6 +318,7 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   grantResource(state, 0, stonePool, STARTING_STOCK);
 
   const iron = addIronTier(state, 0);
+  const knowledge = addKnowledgeTier(state, 0);
 
   return {
     state,
@@ -260,8 +326,9 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
       { id: woodPool, label: "Wood" },
       { id: stonePool, label: "Stone" },
       ...iron.warehouses,
+      ...knowledge.warehouses,
     ],
-    deposits: [woodA, woodB, stoneA, stoneB, ...iron.deposits],
+    deposits: [woodA, woodB, stoneA, stoneB, ...iron.deposits, ...knowledge.deposits],
     converterSites: iron.converterSites,
     contentVersion: WORLD_CONTENT_VERSION,
   };
@@ -283,6 +350,17 @@ const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = 
       warehouses: [...world.warehouses, ...iron.warehouses],
       deposits: [...world.deposits, ...iron.deposits],
       converterSites: [...world.converterSites, ...iron.converterSites],
+    };
+  },
+  // v2 -> v3: layer the global knowledge tier onto a wood/stone+iron save. Same core commands as
+  // createDemoWorld, at the restore-time epoch, so the pool and deposit never retroactively produce
+  // across the offline gap.
+  (world, t): DemoWorld => {
+    const knowledge = addKnowledgeTier(world.state, t);
+    return {
+      ...world,
+      warehouses: [...world.warehouses, ...knowledge.warehouses],
+      deposits: [...world.deposits, ...knowledge.deposits],
     };
   },
 ];
@@ -333,6 +411,7 @@ export function buildExtractor(world: DemoWorld, depositId: Id, t: number): bool
       deposit.rate,
       deposit.id,
       deposit.warehouseId,
+      deposit.payIslandId,
     );
     return true;
   } catch (error) {
@@ -368,7 +447,12 @@ export function buildConverter(world: DemoWorld, site: ConverterSite, t: number)
 // One island = one upgradable warehouse (storage is island-level, not per resource pool).
 export function worldIslands(world: DemoWorld): readonly IslandId[] {
   const seen = new Set<IslandId>();
-  for (const wh of world.warehouses) seen.add(getWarehouse(world.state, wh.id).islandId);
+  for (const wh of world.warehouses) {
+    // The GLOBAL scope (knowledge) has no island storage ladder — its cap is research-gated, not
+    // raised by upgradeIslandCapacity — so it never yields a storage-upgrade button.
+    const island = getWarehouse(world.state, wh.id).islandId;
+    if (!isGlobalScope(island)) seen.add(island);
+  }
   return [...seen];
 }
 
@@ -434,10 +518,19 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
   // must resolve in the deserialized state, or we fail loud into the caller's quarantine path
   // now — a dangling id would otherwise crash the readout on every reload with the bad save
   // still in place.
-  for (const deposit of saved.deposits) {
+  const islands = new Set<IslandId>();
+  forEachWarehouse(state, (_id, warehouse) => islands.add(warehouse.islandId));
+  const deposits: Deposit[] = saved.deposits.map((deposit) => {
     getDeposit(state, deposit.id);
-    getWarehouse(state, deposit.warehouseId);
-  }
+    const pool = getWarehouse(state, deposit.warehouseId);
+    // A carried payIslandId must name an island the doc holds — a bogus one would not crash,
+    // just leave the build forever "unaffordable" (silent soft-lock), so fail loud here instead.
+    if (deposit.payIslandId !== undefined && !islands.has(deposit.payIslandId)) {
+      throw new Error(`no island ${deposit.payIslandId} for deposit ${deposit.id}`);
+    }
+    // Backfill for pre-knowledge saves: payIslandId always equalled the pool's island then.
+    return { ...deposit, payIslandId: deposit.payIslandId ?? pool.islandId };
+  });
   for (const site of saved.converterSites ?? []) {
     getWarehouse(state, site.srcWarehouseId);
     getWarehouse(state, site.dstWarehouseId);
@@ -446,7 +539,7 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
   let world: DemoWorld = {
     state,
     warehouses: saved.warehouses,
-    deposits: saved.deposits,
+    deposits,
     converterSites: saved.converterSites ?? [], // absent on a pre-iron-tier (v1) save
     contentVersion: savedVersion,
   };

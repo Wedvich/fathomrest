@@ -1,5 +1,6 @@
 // Post-commit live drive: headless Chromium against the dev server, walking the storage-upgrade
-// flow end-to-end (fresh world -> build base economy -> buy storage rung 1 -> IndexedDB reopen).
+// flow end-to-end (fresh world -> build base economy -> buy the knowledge observatory -> buy
+// storage rung 1 -> IndexedDB reopen).
 // A verification harness, not a test suite — Vitest owns scenario coverage. Pool readout bars are
 // Pixi CANVAS text and cannot be asserted from the DOM: assertions target the <button> elements;
 // screenshots capture the bars for visual inspection.
@@ -68,6 +69,20 @@ async function storageButton(page) {
   return btn;
 }
 
+// Wait until a button whose label contains `text` is present and enabled.
+async function waitEnabled(page, text, timeout = 45_000) {
+  await page.waitForFunction(
+    (needle) => {
+      const btn = [...document.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes(needle),
+      );
+      return btn !== undefined && !btn.disabled;
+    },
+    text,
+    { timeout },
+  );
+}
+
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
 
@@ -86,24 +101,34 @@ async function main() {
   await page.getByRole("button", { name: /Build extractor · Stone A vein/ }).click();
   await page.screenshot({ path: join(OUT_DIR, "1-before-upgrade.png") });
 
-  // Base extractors produce 2/s each; 40/40 is reachable from 10/10 by ~t=15.
-  await page.waitForFunction(
-    () => {
-      const btn = [...document.querySelectorAll("button")].find((b) =>
-        b.textContent?.includes("Upgrade home storage"),
-      );
-      return btn !== undefined && !btn.disabled;
-    },
-    null,
-    { timeout: 45_000 },
-  );
+  // The knowledge observatory (the first global-scoped resource) is cost-gated only: 40 wood + 40
+  // stone, unaffordable at the 10/10 the base builds leave behind.
+  const observatory = page.getByRole("button", { name: /Build extractor · Knowledge deposit/ });
+  await observatory.waitFor({ timeout: 15_000 });
+  assert(await observatory.isDisabled(), "observatory disabled before the base economy funds it");
 
+  // Base extractors produce 2/s each; 40/40 is reachable from 10/10 by ~t=15.
+  await waitEnabled(page, "Build extractor · Knowledge deposit");
+
+  // Buy the observatory first: it drains the 40/40, so the storage rung (also 40/40) must wait for
+  // a second accrual — a live check that the observatory is paid from the home pools, not the
+  // global knowledge pool it fills.
+  await observatory.click();
+  // The button's label flips to the built state, so re-locate by the new name rather than
+  // reusing the pre-build locator (which no longer matches).
+  await page
+    .getByRole("button", { name: /Knowledge deposit — extractor built/ })
+    .waitFor({ timeout: 5_000 });
+  await page.screenshot({ path: join(OUT_DIR, "2-observatory-built.png") });
+
+  // Storage rung 1: re-accrue to 40/40 after the observatory spent the stock, then upgrade.
+  await waitEnabled(page, "Upgrade home storage");
   await storage.click();
   await page.waitForTimeout(600);
   const afterLabel = await storage.textContent();
   assert(/→ 500/.test(afterLabel ?? ""), `ladder advanced to → 500, got "${afterLabel}"`);
   assert(await storage.isDisabled(), "storage button disabled again after spending the stock");
-  await page.screenshot({ path: join(OUT_DIR, "2-after-upgrade.png") });
+  await page.screenshot({ path: join(OUT_DIR, "3-after-upgrade.png") });
 
   await page.waitForTimeout(1_500); // ~90 frames: the label must not thrash
   assert((await storage.textContent()) === afterLabel, "label stable after the upgrade");
@@ -115,7 +140,7 @@ async function main() {
   await page2.waitForTimeout(1_000);
   const reopenLabel = await storage2.textContent();
   assert(/→ 500/.test(reopenLabel ?? ""), `restored rung after reopen, got "${reopenLabel}"`);
-  await page2.screenshot({ path: join(OUT_DIR, "3-reopen.png") });
+  await page2.screenshot({ path: join(OUT_DIR, "4-reopen.png") });
   await ctx2.close();
 
   assert(pageErrors.length === 0, `no console/page errors, got:\n${pageErrors.join("\n")}`);

@@ -119,6 +119,19 @@ ingredients, never structural edges into the island trees.
   a knowledge deposit, and the tier-0 observatory is **cost-gated only**
   (wood/stone), never research-gated — that's the bootstrap. Resource-converting
   labs (goods → knowledge) are a compatible later addition.
+- **Shipped (vertical slice):** the global pool is a warehouse on a distinguished
+  `global` scope tag, kept off the per-island storage ladder — its cap is
+  research-gated, not raised by `upgradeIslandCapacity` (`world.ts: worldIslands`
+  excludes it). The observatory is a normal cost-gated extractor whose **build-site
+  island** (home, which funds the wood/stone cost) is decoupled from its **output
+  pool** (global): `buildExtractor` now takes the build-site island explicitly rather
+  than inferring it from the output warehouse. The build island must hold a pool for
+  every cost resource — a miss throws a loud wiring error at the command (never the
+  benign "can't afford"), and the deposit's persisted pay island is validated at
+  restore. The global-scope exclusion is a shared predicate (`world.ts:
+isGlobalScope`) that every island-enumerating feature must filter through. Added as
+  a content-version step, so existing saves gain it at the restore epoch without
+  retroactive production.
 
 ### Island specialization (per-island)
 

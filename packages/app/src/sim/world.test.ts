@@ -27,6 +27,7 @@ import {
   snapshotWorld,
   upgradeStorage,
   WORLD_CONTENT_VERSION,
+  worldIslands,
 } from "./world.ts";
 
 // The demo world's deposits are ordered [Wood A, Wood B, Stone A, Stone B]; name them (and
@@ -146,16 +147,24 @@ describe("storage capacity upgrade", () => {
     advance(world.state, 15);
     expect(upgradeStorage(world, HOME, 15)).toBe(true);
 
-    // ONE upgrade raised every home pool (wood, stone, iron-ore, iron-ingot), not just one.
+    // ONE upgrade raised every HOME pool (wood, stone, iron-ore, iron-ingot) together.
     for (const wh of world.warehouses) {
-      expect(getWarehouse(world.state, wh.id).capacity).toBe(250);
+      const warehouse = getWarehouse(world.state, wh.id);
+      if (warehouse.islandId !== HOME) continue; // global knowledge pool is off the island ladder
+      expect(warehouse.capacity).toBe(250);
     }
+    // The global-scoped knowledge pool is NOT on the island storage ladder, so a home upgrade
+    // leaves its cap at the base (its cap is research-gated later).
+    const knowledgeWh = world.warehouses.find((w) => w.label === "Knowledge");
+    expect(knowledgeWh && getWarehouse(world.state, knowledgeWh.id).capacity).toBe(100);
     expect(nextStorageTier(world, HOME)?.capacity).toBe(500); // ladder advanced past tier 1
 
     world.state.wallTime = 0;
     const restored = restoreWorld(structuredClone(snapshotWorld(world)), 0);
     for (const wh of restored.warehouses) {
-      expect(getWarehouse(restored.state, wh.id).capacity).toBe(250);
+      const warehouse = getWarehouse(restored.state, wh.id);
+      if (warehouse.islandId !== HOME) continue; // global knowledge pool is off the island ladder
+      expect(warehouse.capacity).toBe(250);
     }
     expect(nextStorageTier(restored, HOME)?.capacity).toBe(500); // derived, not persisted
   });
@@ -172,7 +181,9 @@ describe("storage capacity upgrade", () => {
       grantResource(world.state, 0, stoneWh.id, 2_000);
       expect(upgradeStorage(world, HOME, 0)).toBe(true);
       for (const wh of world.warehouses) {
-        expect(getWarehouse(world.state, wh.id).capacity).toBe(target);
+        const warehouse = getWarehouse(world.state, wh.id);
+        if (warehouse.islandId !== HOME) continue; // global knowledge pool is off the island ladder
+        expect(warehouse.capacity).toBe(target);
       }
     }
 
@@ -186,7 +197,9 @@ describe("storage capacity upgrade", () => {
     // dropping back to rung 1 and re-charging rungs the player already bought.
     const restored = restoreWorld(woodStoneV1Save(250), 0);
     for (const wh of restored.warehouses) {
-      expect(getWarehouse(restored.state, wh.id).capacity).toBe(250);
+      const warehouse = getWarehouse(restored.state, wh.id);
+      if (warehouse.islandId !== HOME) continue; // global knowledge pool seeds at its own base cap
+      expect(warehouse.capacity).toBe(250);
     }
     expect(nextStorageTier(restored, HOME)?.capacity).toBe(500);
   });
@@ -299,6 +312,7 @@ describe("iron refinement tier", () => {
       "Stone",
       "Iron Ore",
       "Iron Ingot",
+      "Knowledge",
     ]);
     expect(world.deposits.filter((d) => d.resource === ironOre)).toHaveLength(2);
     expect(world.converterSites).toHaveLength(1);
@@ -383,6 +397,7 @@ describe("iron-tier content upgrade", () => {
       "Stone",
       "Iron Ore",
       "Iron Ingot",
+      "Knowledge",
     ]);
     expect(restored.deposits.filter((d) => d.resource === resourceType("iron-ore"))).toHaveLength(
       2,
@@ -427,5 +442,99 @@ describe("envelope reference validation", () => {
     // Fails loud in restoreWorld so the caller quarantines the save, instead of the readout
     // crashing on the dangling id every reload.
     expect(() => restoreWorld(tampered, 0)).toThrow(/no warehouse/);
+  });
+
+  it("rejects a save whose deposit names a pay island the doc doesn't hold", () => {
+    const world = createDemoWorld(1, 0);
+    world.state.wallTime = 0;
+    const snap = structuredClone(snapshotWorld(world));
+    const [woodA, ...rest] = snap.deposits;
+    if (!woodA) throw new Error("wood deposit missing");
+    // A corrupt pay island wouldn't crash — it would leave the build forever "unaffordable"
+    // (a silent soft-lock), so restoreWorld must fail loud into quarantine instead.
+    const tampered: SavedWorld = {
+      ...snap,
+      deposits: [{ ...woodA, payIslandId: islandId("hom") }, ...rest],
+    };
+    expect(() => restoreWorld(tampered, 0)).toThrow(/no island/);
+  });
+});
+
+// The knowledge tier as a scenario (DESIGN.md Progression/Knowledge): a global-scoped pool fed by
+// a cost-gated observatory on the home island. Drives the real core commands, no mocks.
+describe("knowledge tier", () => {
+  const HOME = islandId("home");
+  const GLOBAL = islandId("global");
+  const KNOWLEDGE = resourceType("knowledge");
+
+  function knowledgeDeposit(world: DemoWorld): DemoWorld["deposits"][number] {
+    const deposit = world.deposits.find((d) => d.resource === KNOWLEDGE);
+    if (!deposit) throw new Error("no knowledge deposit in the demo world");
+    return deposit;
+  }
+
+  function knowledgePoolId(world: DemoWorld): ReturnType<typeof addWarehouse> {
+    const warehouse = world.warehouses.find((w) => w.label === "Knowledge");
+    if (!warehouse) throw new Error("no knowledge pool in the demo world");
+    return warehouse.id;
+  }
+
+  it("puts the knowledge pool on the global scope, off the island storage ladder", () => {
+    const world = createDemoWorld(1, 0);
+    expect(getWarehouse(world.state, knowledgePoolId(world)).islandId).toBe(GLOBAL);
+    // The global scope yields no storage-upgrade island — its cap is research-gated, not laddered.
+    expect(worldIslands(world)).toEqual([HOME]);
+  });
+
+  it("gates the observatory behind the base economy, then accrues knowledge into the global pool", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(world);
+    const observatory = knowledgeDeposit(world);
+    const knowledgePool = knowledgePoolId(world);
+
+    // The seeded 30/30 can't fund the 40/40 observatory: the base extractors must run first.
+    expect(buildExtractor(world, observatory.id, 0)).toBe(false);
+
+    // Start wood + stone income (each 2/s from a 10-unit base after the cross-resource builds),
+    // then wait for both home pools to clear the 40 wood + 40 stone cost.
+    expect(buildExtractor(world, woodA.id, 0)).toBe(true);
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
+    expect(buildExtractor(world, observatory.id, 10)).toBe(false); // 10 + 2*10 = 30 each, short of 40
+    expect(buildExtractor(world, observatory.id, 15)).toBe(true); // 40 each: paid from home stock
+
+    // Knowledge now accrues into the global pool at rate 1 * the tier multiplier 2.
+    expect(warehouseAmountAt(world.state, knowledgePool, 20)).toBeCloseTo(10, 9);
+    // A full pool jams (DESIGN.md: a "come spend me" prompt) — the cap holds, never overfills.
+    expect(warehouseAmountAt(world.state, knowledgePool, 1_000)).toBeCloseTo(100, 9);
+  });
+
+  it("injects the knowledge tier onto an iron-era save through offline-safe content upgrade", () => {
+    // A fresh world minus the knowledge tier stands in for a pre-knowledge save: strip the global
+    // pool + deposit and drop the content version, then restore. The upgrade step must re-inject
+    // them via core commands at the restore epoch (no retroactive production across the gap).
+    const fresh = createDemoWorld(1, 0);
+    const saved = structuredClone(snapshotWorld(fresh));
+    const priorVersion = WORLD_CONTENT_VERSION - 1;
+    const preKnowledge: SavedWorld = {
+      ...saved,
+      warehouses: saved.warehouses.filter((w) => w.label !== "Knowledge"),
+      // Strip payIslandId too: a genuine v2 save predates the field, so restore must backfill it.
+      deposits: saved.deposits
+        .filter((d) => d.resource !== KNOWLEDGE)
+        .map(({ payIslandId: _payIslandId, ...deposit }) => deposit),
+      contentVersion: priorVersion,
+      doc: {
+        ...saved.doc,
+        warehouses: saved.doc.warehouses.filter(([, w]) => w.resource !== KNOWLEDGE),
+        deposits: saved.doc.deposits.filter(([, d]) => d.resource !== KNOWLEDGE),
+      },
+    };
+
+    const restored = restoreWorld(preKnowledge, 0);
+    expect(snapshotWorld(restored).contentVersion).toBe(WORLD_CONTENT_VERSION);
+    expect(getWarehouse(restored.state, knowledgePoolId(restored)).islandId).toBe(GLOBAL);
+    expect(restored.deposits.filter((d) => d.resource === KNOWLEDGE)).toHaveLength(1);
+    // Backfilled: every pre-knowledge deposit funds from its pool's island again.
+    for (const deposit of restored.deposits) expect(deposit.payIslandId).toBe(HOME);
   });
 });

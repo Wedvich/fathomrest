@@ -6,61 +6,75 @@ pick up next".
 
 ## Done this session
 
-**Adversarial review of the storage-upgrade changes + all five findings fixed** (24
-candidates from 8 finder angles, verified down to 3 confirmed + 2 plausible):
+**Research track, part 1 — knowledge (the first global-scoped resource).** Shipped the
+extraction half of DESIGN.md "Progression/Knowledge": a global knowledge pool fed by a
+cost-gated observatory on the demo island.
 
-- **Ladder-reset re-buy tax (the design finding; settled: seed at island cap):** a content
-  step adding a pool at base cap to an already-upgraded island reset the min-derived ladder
-  to rung 1, forcing a full re-buy (540/540 wood/stone) to lift one pool. New
-  `islandStorageCap` helper (min cap across the island's pools); `addIronTier` now seeds new
-  pools at the island's current rung, so future content tiers never reset the ladder.
-  Convention recorded in DESIGN.md; pinned by a restore test on a v1 save with 250 caps
-  (`woodStoneV1Save(poolCap)`).
-- **Frame-loop allocation:** `nextStorageTier` allocated a `.find` closure + `for...of`
-  iterator per frame (banned by browser-performance.md) — now indexed loops, no closures.
-- **Core cleanup:** `upgradeIslandCapacity`'s re-anchor loop now calls `reanchorWarehouse`
-  (the dead `Math.min` dropped; comment notes the re-anchor-before-swap ordering is what's
-  load-bearing).
-- **Button cache:** three interlocking cache vars (NaN/Infinity sentinels, nullable costMap,
-  dead null guard) collapsed to one `lastTier` reference compare — `nextStorageTier` returns
-  a stable `STORAGE_TIERS` element, `undefined` once maxed.
-- **Infinity guard:** `upgradeIslandCapacity` AND `addWarehouse` (identical pre-existing gap)
-  now require `Number.isFinite(capacity)` — Infinity previously produced a save that failed
-  `checkPositive` on the next load (quarantine). Core test walks 0/-1/NaN/Infinity.
+- **Core:** `buildExtractor` now takes an explicit **build-site island** (`buildIslandId`)
+  instead of inferring the cost island from the output warehouse. This decouples where the
+  cost is paid from where the output lands — needed because the observatory sits on (and is
+  paid from) `home` while filling the `global` pool. Same-island builds are unchanged
+  (callers pass the pool's island). New core test pins the decoupling; the 6 existing
+  `buildExtractor` call sites updated.
+- **App (`world.ts`):** `KNOWLEDGE` resource, a `GLOBAL` scope tag, `KNOWLEDGE_CAP` (100,
+  placeholder), and `addKnowledgeTier` (global pool on `GLOBAL` + observatory deposit on
+  `home`, cost 40 wood + 40 stone above the seed like the iron tier). Wired into
+  `createDemoWorld` and as a **v2→v3 content-upgrade step** (WORLD_CONTENT_VERSION now 3),
+  so existing saves gain knowledge at the restore epoch without retroactive production. App
+  `Deposit` view model carries `payIslandId` (the funding/site island). `worldIslands`
+  excludes `GLOBAL` so the global pool's cap stays **off the wood/stone storage ladder**
+  (it's research-gated later).
+- **UI (`PixiReadout.tsx`):** build buttons now key off an explicit `payIslandId` (not a
+  paying-warehouse). Knowledge pool bar + observatory build button appear automatically.
+- **Tests:** new `knowledge tier` scenario in `world.test.ts` (global scope + off-ladder,
+  observatory gated behind the base economy then accrues into the global pool + jams at cap,
+  content-upgrade injection). Storage/label tests updated for the extra pool.
 
-`typecheck | lint | format | test` green (107 tests). **Live-driven + verified
-(Playwright/Chromium, headless, persistent profile):** upgrade button disabled at 30/30,
-enabled at 40/40, one click raised all four caps 100→250 with the canvas bar denominators
-re-rendering live, label advanced to "→ 500", stable over ~90 frames, IDB reopen restored
-caps + rung, zero console/page errors. Not reached live: the "storage maxed" label (~4 min
-of accrual; pinned by the ladder-walk test).
+**Adversarial review of the knowledge changes + the four load-bearing findings fixed** (8
+finder angles → 10 verified findings; the remaining six are test/drive-script nits that can
+ride along later):
 
-**Repo-resident browser-drive harness shipped** (the post-commit live drive is no longer
-hand-rolled per session): `packages/app/scripts/drive.mjs` (run with **node** via
-`bun run --filter '@fathomrest/app' drive`; fresh temp profile, hard assertions, exit 1 on
-any console error, screenshots to gitignored `packages/app/drive-output/`), playwright as an
-app devDependency, and a `.claude/skills/browser-drive` project skill that `/run` discovers
-(fail-driven setup — the script prescribes `bunx playwright install chromium` only when the
-cached build is actually missing). Verified end-to-end from the committed entry point:
-drive PASS in ~20s. **Extend the drive script when a change adds new UI** — it's the
-standard verification after every commit.
+- **Loud wiring error:** core `debitCost` now throws a plain `Error` (never the benign,
+  catch-and-retried `InsufficientStockError`) when the build island has **no pool at all**
+  for a cost resource — a miswired `payIslandId` fails loud instead of presenting as a
+  forever-disabled build button (silent soft-lock). Pinned by a core test.
+- **Restore boundary:** `restoreWorld` validates each deposit's persisted `payIslandId`
+  against the doc's islands — corruption quarantines loudly, same as dangling ids.
+- **`payIslandId` required at runtime:** backfilled once in `restoreWorld` (new
+  `SavedDeposit` keeps the field optional for pre-knowledge saves); the duplicated
+  `?? getWarehouse(...).islandId` fallbacks in `world.ts` and `PixiReadout.tsx` are gone.
+- **`isGlobalScope` predicate (exported):** the GLOBAL exclusion is a shared predicate, no
+  longer an inline string-compare in `worldIslands` — island XP and any future
+  island-enumerating feature must filter through it, not re-derive the exclusion.
+
+`typecheck | lint | format | test` green (113 tests). **Live-driven (browser-drive skill,
+headless Chromium):** observatory disabled at the 30/30 seed, enabled once the base economy
+funds 40/40, one click built it (button flipped to "extractor built"), then the storage rung
+still bought after re-accrual — proving the observatory is paid from home, not the global
+pool it fills. Knowledge bar renders (0/100 fresh, 47/100 accrued on reopen), no "global
+storage" button, IDB reopen clean, zero console errors. `drive.mjs` extended to cover the
+observatory; screenshots in the gitignored `packages/app/drive-output/`.
+
+Note: `package.json` gained a `dev` script (was already in the working tree at session
+start, not from this work) — fine to keep, just not part of the knowledge change.
 
 ## Next session
 
-1. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge as
-   the first global-scoped resource (global capped pool, observatory extractor on a knowledge
-   deposit) → timed research queue (depth 2, paid at enqueue) → thin unlock tree. Note: the
-   storage upgrade shipped cost-gated only; research-gating it (DESIGN.md unlock category
-   "in-place building upgrades") is a later layer once research exists.
-2. **Island XP + skill tree**: throughput-fed XP accumulator (own stored quantity), levels,
-   trunk + Extraction/Refinement branches; junction research-gated; nodes instant, paid in
-   island-local resources.
-3. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency. This is
-   what makes "placeable storage building" distinct from the island upgrade shipped now — the
-   ladder can re-skin onto slotted placeables once slots exist.
+1. **Research queue (part 2 of the research track).** With knowledge now produced, build the
+   timed research queue (DESIGN.md "Research (global)"): full knowledge cost paid **upfront at
+   enqueue**, timer runs offline at full fidelity, **queue depth 2** (banking knowledge past
+   the cap when queued is intended). This is the first thing that _spends_ knowledge and
+   turns the "jam at cap" into the "come spend me" prompt.
+2. **Thin unlock tree (part 3).** A few research nodes across the unlock categories
+   (buildings, in-place building upgrades, economy modifiers, island-tree gates). First
+   concrete payoff: **research-gate the storage upgrade** (it shipped cost-gated only —
+   DESIGN.md unlock category "in-place building upgrades").
+3. Then the two-track's second track: **Island XP + skill tree** (throughput-fed XP,
+   trunk + Extraction/Refinement branches, junction research-gated).
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) — the
-mechanism for networking island pools. Pick up once single-island depth is proven.
+mechanism for networking island pools, and what makes multiple islands' observatories all
+feed the one global knowledge pool. Pick up once single-island depth is proven.
 
 Carried over: the PWA service worker pins old bundles until the update prompt is accepted —
 rebuild `packages/app/dist/` before serving it anywhere.

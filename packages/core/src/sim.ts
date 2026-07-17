@@ -656,14 +656,8 @@ export function addDeposit(
 
 // Shared extractor wiring validation: rate sign, both endpoints exist, and the deposit's
 // resource matches the warehouse's (the solver ignores types, so a mismatch must be caught
-// here). Returns the target warehouse for callers that need it (buildExtractor reads its
-// island for the cost debit).
-function checkExtractorWiring(
-  state: SimState,
-  rate: number,
-  depositId: Id,
-  warehouseId: Id,
-): Warehouse {
+// here).
+function checkExtractorWiring(state: SimState, rate: number, depositId: Id, warehouseId: Id): void {
   if (!(rate >= 0)) {
     throw new Error(`extractor rate must be >= 0, got ${rate}`);
   }
@@ -674,7 +668,6 @@ function checkExtractorWiring(
       `extractor resource mismatch: deposit yields ${deposit.resource}, warehouse stores ${warehouse.resource}`,
     );
   }
-  return warehouse;
 }
 
 export function addExtractor(
@@ -742,8 +735,13 @@ function debitCost(
       continue;
     }
     const warehouse = islandWarehouse(state, island, resource);
+    if (warehouse === undefined) {
+      // No pool for a cost resource means the island can never pay — miswired content, not a
+      // stock shortfall, so it must not be the benign catch-and-retry error below.
+      throw new Error(`no ${resource} pool on island ${island} to pay a build cost`);
+    }
     const available = availableForBuild(warehouse, t);
-    if (warehouse === undefined || available < amount) {
+    if (available < amount) {
       throw new InsufficientStockError(
         `insufficient ${resource} on island ${island}: need ${amount}, have ${available}`,
       );
@@ -784,10 +782,13 @@ export function canAffordBuild(
   return true;
 }
 
-// Player build command: pay `cost` from the build site's island, then place the extractor,
+// Player build command: pay `cost` from the build-site island, then place the extractor,
 // atomically. Same validate -> advance -> mutate -> derive shape as addExtractor, but the
-// resources leave stock and the producer appears in one command at t. Cost is charged only
-// against the target warehouse's island (island.ts) — stock on other islands is untouchable.
+// resources leave stock and the producer appears in one command at t. Cost is charged against
+// `buildIslandId` — the island the structure is built on (island.ts), stock on other islands is
+// untouchable. For a same-island pool that equals the output warehouse's island; it differs only
+// when the output is a global-scoped pool (a knowledge observatory built on and paid from home
+// while filling the global knowledge pool).
 export function buildExtractor(
   state: SimState,
   t: number,
@@ -795,10 +796,11 @@ export function buildExtractor(
   rate: number,
   depositId: Id,
   warehouseId: Id,
+  buildIslandId: IslandId,
 ): Id {
-  const warehouse = checkExtractorWiring(state, rate, depositId, warehouseId);
+  checkExtractorWiring(state, rate, depositId, warehouseId);
   advance(state, t);
-  debitCost(state, t, warehouse.islandId, cost);
+  debitCost(state, t, buildIslandId, cost);
   const id = allocId(state);
   setExtractor(state, id, createExtractor(rate, depositId, warehouseId));
   deriveAll(state);

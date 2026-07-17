@@ -470,7 +470,7 @@ describe("resource-costed building", () => {
 
   it("debits the build cost from the island's single resource pool", () => {
     const { state, orePool, stoneDeposit, quarry } = homeIsland();
-    buildExtractor(state, 10, new Map([[ore, 30]]), 5, stoneDeposit, quarry);
+    buildExtractor(state, 10, new Map([[ore, 30]]), 5, stoneDeposit, quarry, home);
     // 60 ore at t=10, less the 30 charge -> 30 left; the new extractor then produces stone.
     expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(30, 9);
     expect(warehouseAmountAt(state, quarry, 20)).toBeCloseTo(50, 9);
@@ -478,9 +478,9 @@ describe("resource-costed building", () => {
 
   it("rejects an unaffordable build without touching any stock (atomic)", () => {
     const { state, orePool, stoneDeposit, quarry } = homeIsland();
-    expect(() => buildExtractor(state, 10, new Map([[ore, 100]]), 5, stoneDeposit, quarry)).toThrow(
-      /insufficient/,
-    );
+    expect(() =>
+      buildExtractor(state, 10, new Map([[ore, 100]]), 5, stoneDeposit, quarry, home),
+    ).toThrow(/insufficient/);
     expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
     expect(warehouseAmountAt(state, quarry, 20)).toBe(0); // no producer was wired
   });
@@ -491,10 +491,42 @@ describe("resource-costed building", () => {
     const otherDeposit = addDeposit(state, 0, ore, [], 1);
     const vault = addWarehouse(state, 0, ore, other, 10_000);
     addExtractor(state, 0, 100, otherDeposit, vault); // 1000 ore by t=10, all off-island
-    expect(() => buildExtractor(state, 10, new Map([[ore, 100]]), 5, stoneDeposit, quarry)).toThrow(
-      /insufficient/,
-    );
+    expect(() =>
+      buildExtractor(state, 10, new Map([[ore, 100]]), 5, stoneDeposit, quarry, home),
+    ).toThrow(/insufficient/);
     expect(warehouseAmountAt(state, vault, 10)).toBeCloseTo(1_000, 9);
+  });
+
+  it("charges the build-site island, not the output pool's island", () => {
+    // A knowledge-style observatory: the output pool sits off the home island (a global scope),
+    // but the wood/stone cost is paid from home, where the structure is built.
+    const state = createSimState(42, 0);
+    const oreDeposit = addDeposit(state, 0, ore, [], 1);
+    const orePool = addWarehouse(state, 0, ore, home, 1_000);
+    addExtractor(state, 0, 6, oreDeposit, orePool); // 60 ore on home by t=10
+    const offDeposit = addDeposit(state, 0, stone, [], 1);
+    const offPool = addWarehouse(state, 0, stone, other, 100);
+    buildExtractor(state, 10, new Map([[ore, 30]]), 5, offDeposit, offPool, home);
+    // Paid from home's ore pool (60 -> 30) while the producer fills the off-home pool.
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(30, 9);
+    expect(warehouseAmountAt(state, offPool, 20)).toBeCloseTo(50, 9);
+  });
+
+  it("treats a build island with no pool for a cost resource as miswired content, not a shortfall", () => {
+    const { state, orePool, stoneDeposit, quarry } = homeIsland();
+    // `other` holds no ore pool at all: the cost can never be paid there. That must NOT be the
+    // benign InsufficientStockError callers catch-and-retry — it would soft-lock silently.
+    expect(() =>
+      buildExtractor(state, 10, new Map([[ore, 30]]), 5, stoneDeposit, quarry, other),
+    ).toThrow(/no ore pool on island other/);
+    let thrown: unknown;
+    try {
+      buildExtractor(state, 10, new Map([[ore, 30]]), 5, stoneDeposit, quarry, other);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).not.toBeInstanceOf(InsufficientStockError);
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9); // nothing debited
   });
 
   it("does not debit an affordable resource when another in the cost falls short", () => {
@@ -504,7 +536,9 @@ describe("resource-costed building", () => {
       [ore, 30],
       [stone, 100],
     ]);
-    expect(() => buildExtractor(state, 10, cost, 5, stoneDeposit, quarry)).toThrow(/insufficient/);
+    expect(() => buildExtractor(state, 10, cost, 5, stoneDeposit, quarry, home)).toThrow(
+      /insufficient/,
+    );
     expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
   });
 });
@@ -672,8 +706,8 @@ describe("granted stockpile bootstrap", () => {
   it("gates the third build behind accumulation from the first two", () => {
     const { state, woodPool, stonePool, woodDepositB, stoneDepositA } = bootstrap();
     // Build both starters at t=0: stone extractor costs 20 wood, wood extractor costs 20 stone.
-    buildExtractor(state, 0, new Map([[wood, 20]]), 1, stoneDepositA, stonePool);
-    buildExtractor(state, 0, new Map([[stone, 20]]), 1, woodDepositB, woodPool);
+    buildExtractor(state, 0, new Map([[wood, 20]]), 1, stoneDepositA, stonePool, home);
+    buildExtractor(state, 0, new Map([[stone, 20]]), 1, woodDepositB, woodPool, home);
     // 30 - 20 = 10 in each pool; both new extractors now produce 1/s into their pool.
     expect(warehouseAmountAt(state, woodPool, 0)).toBeCloseTo(10, 9);
     expect(warehouseAmountAt(state, stonePool, 0)).toBeCloseTo(10, 9);

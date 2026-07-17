@@ -7,7 +7,6 @@ import {
   getWarehouse,
   warehouseAmountAt,
   warehouseOutflowRate,
-  type Id,
   type IslandId,
   type ResourceType,
 } from "@fathomrest/core";
@@ -323,7 +322,7 @@ export function PixiReadout(): React.JSX.Element {
         cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
       const addBuildButton = (spec: {
         cost: readonly (readonly [ResourceType, number])[];
-        payingWarehouseId: Id; // the pool whose island the cost is charged against
+        payIslandId: IslandId; // the build-site island whose stock the cost is charged against
         builtLabel: string;
         buildLabel: string;
         isBuilt: () => boolean;
@@ -332,7 +331,7 @@ export function PixiReadout(): React.JSX.Element {
         const el = document.createElement("button");
         el.type = "button";
         const costMap = new Map<ResourceType, number>(spec.cost);
-        const island: IslandId = getWarehouse(world.state, spec.payingWarehouseId).islandId;
+        const island: IslandId = spec.payIslandId;
         el.addEventListener("click", () => {
           // Save-on-command: persist only when the build actually happened; a rejected build
           // (unaffordable) leaves state untouched, so there is nothing to save.
@@ -359,7 +358,7 @@ export function PixiReadout(): React.JSX.Element {
       for (const dep of world.deposits) {
         addBuildButton({
           cost: dep.cost,
-          payingWarehouseId: dep.warehouseId,
+          payIslandId: dep.payIslandId,
           builtLabel: `${dep.label} — extractor built`,
           buildLabel: `Build extractor · ${dep.label} (${formatCost(dep.cost)})`,
           isBuilt: () => isExtractorBuilt(world, dep.id),
@@ -372,7 +371,7 @@ export function PixiReadout(): React.JSX.Element {
       for (const site of world.converterSites) {
         addBuildButton({
           cost: site.cost,
-          payingWarehouseId: site.srcWarehouseId,
+          payIslandId: getWarehouse(world.state, site.srcWarehouseId).islandId,
           builtLabel: `${site.label} — built`,
           buildLabel: `Build ${site.label} (${formatCost(site.cost)})`,
           isBuilt: () => isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId),
