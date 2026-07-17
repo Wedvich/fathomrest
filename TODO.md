@@ -35,35 +35,27 @@ re-rendering live, label advanced to "→ 500", stable over ~90 frames, IDB reop
 caps + rung, zero console/page errors. Not reached live: the "storage maxed" label (~4 min
 of accrual; pinned by the ladder-walk test).
 
+**Repo-resident browser-drive harness shipped** (the post-commit live drive is no longer
+hand-rolled per session): `packages/app/scripts/drive.mjs` (run with **node** via
+`bun run --filter '@fathomrest/app' drive`; fresh temp profile, hard assertions, exit 1 on
+any console error, screenshots to gitignored `packages/app/drive-output/`), playwright as an
+app devDependency, and a `.claude/skills/browser-drive` project skill that `/run` discovers
+(fail-driven setup — the script prescribes `bunx playwright install chromium` only when the
+cached build is actually missing). Verified end-to-end from the committed entry point:
+drive PASS in ~20s. **Extend the drive script when a change adds new UI** — it's the
+standard verification after every commit.
+
 ## Next session
 
-1. **Repo-resident browser-drive setup (do this first).** The post-commit live drive (dev
-   server + Playwright/Chromium) has been hand-rolled from a throwaway tmp dir two sessions
-   in a row; it's the standard "verify what we just did" step after every commit, so make it
-   repeatable in-repo:
-   - Playwright as a devDependency (app package or a small tools workspace); browser install
-     via `bunx playwright install chromium`; run the driver with **node, not bun**.
-   - A committed drive script covering this session's proven flow: fresh persistent profile →
-     assert storage button disabled at 30/30 → click both base extractor buttons → wait for
-     enable (~15s) → click upgrade → assert label "→ 500" + disabled → screenshots → close and
-     reopen the same profile → assert restored caps/rung. Working version (recoverable if tmp
-     was cleaned: rewrite from this description) at
-     `~/.claude/jobs/0d20a627/tmp/pw/drive.mjs`.
-   - A project skill under `.claude/skills/` so `/run` finds it (`/run-skill-generator` can
-     scaffold): launch recipe (`bun run --filter '@fathomrest/app' dev`, port 5173), driver
-     invocation, and the key caveat — pool readouts are Pixi **canvas** text, so verify bars
-     via screenshots; only the buttons are DOM-assertable.
-   - Keep it a drive (verification harness), not a test suite — Vitest already owns the
-     scenario coverage.
-2. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge as
+1. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge as
    the first global-scoped resource (global capped pool, observatory extractor on a knowledge
    deposit) → timed research queue (depth 2, paid at enqueue) → thin unlock tree. Note: the
    storage upgrade shipped cost-gated only; research-gating it (DESIGN.md unlock category
    "in-place building upgrades") is a later layer once research exists.
-3. **Island XP + skill tree**: throughput-fed XP accumulator (own stored quantity), levels,
+2. **Island XP + skill tree**: throughput-fed XP accumulator (own stored quantity), levels,
    trunk + Extraction/Refinement branches; junction research-gated; nodes instant, paid in
    island-local resources.
-4. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency. This is
+3. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency. This is
    what makes "placeable storage building" distinct from the island upgrade shipped now — the
    ladder can re-skin onto slotted placeables once slots exist.
 
