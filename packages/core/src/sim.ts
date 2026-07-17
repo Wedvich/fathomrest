@@ -717,6 +717,11 @@ function availableForBuild(warehouse: Warehouse | undefined, t: number): number 
   return warehouse === undefined ? 0 : clampedAmount(warehouse, t);
 }
 
+// The one benign build failure: the island can't cover the cost vector yet. Callers may
+// catch this and retry once stock accrues; every other build throw is a wiring/content bug
+// and must propagate.
+export class InsufficientStockError extends Error {}
+
 // Debit a build cost from one island's stock. Each cost resource maps to that island's single
 // pool for it (islandWarehouse). Affordability is checked for the WHOLE vector before any pool
 // is touched, so a shortfall on one resource can't half-charge the player. Reads amounts at t
@@ -739,7 +744,7 @@ function debitCost(
     const warehouse = islandWarehouse(state, island, resource);
     const available = availableForBuild(warehouse, t);
     if (warehouse === undefined || available < amount) {
-      throw new Error(
+      throw new InsufficientStockError(
         `insufficient ${resource} on island ${island}: need ${amount}, have ${available}`,
       );
     }

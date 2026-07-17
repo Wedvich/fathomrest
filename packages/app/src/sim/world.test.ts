@@ -3,6 +3,7 @@ import {
   addWarehouse,
   advance,
   createSimState,
+  deserializeState,
   grantResource,
   islandId,
   resourceType,
@@ -10,7 +11,7 @@ import {
   serializeState,
   warehouseAmountAt,
 } from "@fathomrest/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   buildConverter,
@@ -232,6 +233,39 @@ describe("iron refinement tier", () => {
     expect(world.converterSites).toHaveLength(1);
   });
 
+  it("gates iron builds behind accumulation: the seeded stock can't fund them", () => {
+    const world = createDemoWorld(1, 0);
+    const [site] = world.converterSites;
+    const oreVein = world.deposits.find((d) => d.label === "Iron Ore A vein");
+    const woodVein = world.deposits.find((d) => d.label === "Wood A vein");
+    if (!site || !oreVein || !woodVein) throw new Error("demo content missing");
+    // The 30/30 seed covers a base extractor but not an iron build, so the refinery can never
+    // be built first and strand the bootstrap with no wood/stone income (the t=0 soft-lock).
+    expect(buildConverter(world, site, 0)).toBe(false);
+    expect(buildExtractor(world, oreVein.id, 0)).toBe(false);
+    expect(buildExtractor(world, woodVein.id, 0)).toBe(true);
+  });
+
+  it("propagates a miswired site instead of reporting it as unaffordable", () => {
+    const world = createDemoWorld(1, 0);
+    grantResource(world.state, 0, poolId(world, "Wood"), 100);
+    grantResource(world.state, 0, poolId(world, "Stone"), 100);
+    const [site] = world.converterSites;
+    if (!site) throw new Error("iron refinery site missing");
+    // A doctored site whose destination sits on another island: the world wrapper must let the
+    // core's structural rejection escape rather than translate it to "can't afford yet".
+    const offIsland = addWarehouse(
+      world.state,
+      0,
+      resourceType("iron-ingot"),
+      islandId("elsewhere"),
+      100,
+    );
+    expect(() => buildConverter(world, { ...site, dstWarehouseId: offIsland }, 0)).toThrow(
+      /share an island/,
+    );
+  });
+
   it("builds the chain: extractor feeds ore, refinery refines it at draw·ratio", () => {
     const world = createDemoWorld(1, 0);
     const ironOrePool = poolId(world, "Iron Ore");
@@ -239,7 +273,7 @@ describe("iron refinement tier", () => {
     const oreVein = world.deposits.find((d) => d.label === "Iron Ore A vein");
     const [site] = world.converterSites;
     if (!oreVein || !site) throw new Error("iron content missing");
-    // Both iron builds cost 20 wood + 20 stone; grant a surplus so the tier isn't gated by the
+    // Both iron builds cost 40 wood + 40 stone; grant a surplus so the tier isn't gated by the
     // wood/stone economy here (that gating is covered by the bootstrap scenarios above).
     grantResource(world.state, 0, poolId(world, "Wood"), 100);
     grantResource(world.state, 0, poolId(world, "Stone"), 100);
@@ -283,5 +317,44 @@ describe("iron-tier content upgrade", () => {
       2,
     );
     expect(restored.converterSites).toHaveLength(1);
+  });
+
+  it("keeps a failed upgrade step retryable instead of stamping the version current", () => {
+    // Sabotage: the v1 doc already holds a home iron-ore pool, so addIronTier trips the
+    // one-pool-per-(island, resource) invariant and the v1->v2 step throws.
+    const save = woodStoneV1Save();
+    const state = deserializeState(save.doc);
+    addWarehouse(state, 0, resourceType("iron-ore"), islandId("home"), 100);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const restored = restoreWorld({ ...save, doc: serializeState(state) }, 0);
+      // Version held at 1 (not max'd to current) and no partial iron content: the next
+      // restore retries the step rather than skipping it forever.
+      expect(warn).toHaveBeenCalledOnce();
+      expect(snapshotWorld(restored).contentVersion).toBe(1);
+      expect(restored.converterSites).toHaveLength(0);
+      expect(restored.warehouses.map((w) => w.label)).toEqual(["Wood", "Stone"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("envelope reference validation", () => {
+  it("rejects a save whose converter site references a pool the doc doesn't hold", () => {
+    const world = createDemoWorld(1, 0);
+    world.state.wallTime = 0;
+    const snap = structuredClone(snapshotWorld(world));
+    // An id allocated only after the snapshot was taken — no entity in the saved doc holds it.
+    const missing = addWarehouse(world.state, 0, resourceType("copper"), islandId("home"), 1);
+    const [site] = snap.converterSites ?? [];
+    if (!site) throw new Error("iron refinery site missing");
+    const tampered: SavedWorld = {
+      ...snap,
+      converterSites: [{ ...site, srcWarehouseId: missing }],
+    };
+    // Fails loud in restoreWorld so the caller quarantines the save, instead of the readout
+    // crashing on the dangling id every reload.
+    expect(() => restoreWorld(tampered, 0)).toThrow(/no warehouse/);
   });
 });

@@ -20,6 +20,7 @@ import {
   depositRemainingAt,
   extractorEffectiveRate,
   grantResource,
+  InsufficientStockError,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
@@ -545,6 +546,15 @@ describe("resource-costed converter builds", () => {
       buildConverter(state, 10, new Map([[ore, 20]]), orePool, offIsland, 4, 0.5),
     ).toThrow(/share an island/);
     expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
+  });
+
+  it("throws InsufficientStockError when the island can't cover the cost", () => {
+    const { state, orePool, ingotPool } = refineryIsland();
+    // t=0: the extractor hasn't produced yet, so the 20-ore charge is uncoverable. The typed
+    // error is what lets callers treat only this failure as retryable.
+    expect(() =>
+      buildConverter(state, 0, new Map([[ore, 20]]), orePool, ingotPool, 4, 0.5),
+    ).toThrow(InsufficientStockError);
   });
 });
 

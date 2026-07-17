@@ -6,32 +6,53 @@ pick up next".
 
 ## Done last session
 
-**Buildable converters + the first refinement tier (iron-ore → iron-ingot). Two commits.**
+**Adversarial review of the refinement-tier commits (`247be49` + `03bbf79`) + fixes.**
+Nine verified findings (six confirmed, three plausible); eight fixed, one skipped:
 
-- **Commit 1 (engine, `247be49`):** `buildConverter` fronting `addConverter`, mirroring
-  `buildExtractor` — validate → advance → `debitCost` from the shared island pool → place →
-  `deriveAll`, atomically at `t`. Adds a single-island assertion (both endpoints must share
-  an island, checked before any mutation) and charges the cost against that island's pool.
-  Extracted `checkConverterWiring` shared by `addConverter`/`buildConverter`. No save-version
-  bump. Two scenario tests (debit-and-wire happy path; cross-island rejection is atomic).
-- **Commit 2 (content, `03bbf79`):** iron-ore worked by two cost-gated deposits, refined to
-  iron-ingot by the converter — iron-ore extractor and refinery both paid in wood/stone.
-  New `ConverterSite` envelope model (built-state derived from a live converter's (src, dst)
-  pair via `isConverterBuilt`); `buildConverter` world wrapper; a `PixiReadout` build button
-  mirroring the deposit buttons. First real `WORLD_UPGRADES` step (v1→v2 injects the iron
-  tier into pre-iron saves) + `WORLD_CONTENT_VERSION` bump. DESIGN.md updated (refinement no
-  longer "deferred"). Live UI driven end-to-end (build button flips, stock debits, iron-ore
-  extractor gates correctly); `typecheck | lint | format | build | test` green (96 tests).
+- **t=0 soft-lock (the big one):** iron builds (20 wood + 20 stone) were affordable from the
+  30/30 seed, so building the refinery (or iron-ore extractor) first stranded the player at
+  10/10 with zero wood/stone income — permanently. Fixed by `IRON_BUILD_COST = 40` (> seed):
+  both base extractors must be running before any iron build is affordable. This also made
+  the DESIGN.md/world.ts "gates behind a base-economy surplus" claim true (it was false —
+  the conventions finding); DESIGN.md wording updated. Pinned by a gating scenario test.
+- **Upgrade-step version stamping:** `restoreWorld` stamped `contentVersion` to current
+  _before_ running `WORLD_UPGRADES`, so a throwing step re-persisted at v2 with no iron
+  content — permanent loss, contradicting the "recoverable" comment. Now stamped per
+  successful step; a failing step keeps the version where it was, skips the remaining steps,
+  and is retried on the next restore. Test: a sabotaged v1 save (pre-existing home iron-ore
+  pool) stays at v1.
+- **Envelope validation:** `restoreWorld` now resolves every core id the envelope carries
+  (deposit ids/pools, converter-site pools) so a dangling id fails loud into the quarantine
+  path instead of crashing the readout on every reload (was also a pre-existing gap for
+  deposits).
+- **Typed build failure:** new core `InsufficientStockError` thrown by `debitCost`; the
+  world-layer `buildExtractor`/`buildConverter` catch only it and rethrow structural errors
+  (single-island violation, DAG cycle, bad cap/ratio) instead of mislabeling them
+  "insufficient stock". Tests pin both the typed throw and the propagation.
+- **UI dedup:** the deposit and converter build-button loops in `PixiReadout` collapsed into
+  one `addBuildButton` helper (isBuilt/build thunks + labels); converter label no longer
+  hardcodes "Build refinery" (was "Build refinery · Iron Refinery"; now derives from
+  `site.label`).
+- **Documented limit:** the (src, dst) pool pair is a `ConverterSite`'s identity — at most
+  one site per pair; a second recipe on the same pair needs a real site id first (comment on
+  `ConverterSite`).
+- **Skipped (deliberate):** `buildConverter` duplicating `addConverter`'s 3-line placement
+  tail — same symmetric convention as `buildExtractor`/`addExtractor`, extraction not worth
+  the churn. Refuted by the repo's own docs, not fixed: per-frame `isConverterBuilt` scan and
+  `canAffordBuild` island lookup (browser-performance.md's don't-optimize-unprofiled rule),
+  cap/ratio persisted per site (established envelope pattern, same as `Deposit.rate`).
+
+`typecheck | lint | format | build | test` green (101 tests). **Not live-driven this
+session** — the PixiReadout button refactor is typechecked and built but the buttons
+haven't been clicked in a browser since the dedup; worth a quick drive next session.
 
 ## Next session
 
 **Focus stays single-island. Inter-island (buildable routes) still deferred.**
 
-1. **Refinery affordability tuning (small, flagged during the UI drive):** the refinery is
-   affordable at t=0 from the 30/30 starting stock (costs 20 wood + 20 stone), so it can be
-   built before any iron-ore extractor exists — the "gates behind a base-economy surplus"
-   intent only bites on the *second* iron build. If we want the refinery itself gated, raise
-   its cost or require iron-ore in the recipe. Placeholder tuning — playtest territory.
+1. **Quick UI drive:** confirm the refactored build buttons (extractor + refinery) still
+   flip/disable correctly in the live app, and that the refinery is disabled at t=0 until
+   the base economy accumulates 40/40.
 2. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
    authored constants today. A placeable storage building that raises a pool's capacity is the
    "pool + capacity buildings" model the grill settled on — fold into the costed-builds layer.

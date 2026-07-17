@@ -7,6 +7,7 @@ import {
   getWarehouse,
   warehouseAmountAt,
   warehouseOutflowRate,
+  type Id,
   type IslandId,
   type ResourceType,
 } from "@fathomrest/core";
@@ -297,76 +298,71 @@ export function PixiReadout(): React.JSX.Element {
         });
       });
 
-      // One build button per deposit, created imperatively so the React tree stays static and
-      // the frame loop can drive each button's disabled state without a re-render. Each caches
-      // its cost Map and island once (the frame loop must not allocate — perf doc) and rewrites
-      // its own label/disabled only when the underlying state actually changes.
+      // Build buttons, created imperatively so the React tree stays static and the frame loop
+      // can drive each button's disabled state without a re-render. Each caches its cost Map
+      // and island once (the frame loop must not allocate — perf doc) and rewrites its own
+      // label/disabled only when the underlying state actually changes.
       type BuildButton = { update: (t: number) => void };
       const buttons: BuildButton[] = [];
       controls.textContent = ""; // StrictMode re-run: drop any buttons the prior pass appended
-      for (const dep of world.deposits) {
+      const formatCost = (cost: readonly (readonly [ResourceType, number])[]): string =>
+        cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
+      const addBuildButton = (spec: {
+        cost: readonly (readonly [ResourceType, number])[];
+        payingWarehouseId: Id; // the pool whose island the cost is charged against
+        builtLabel: string;
+        buildLabel: string;
+        isBuilt: () => boolean;
+        build: (t: number) => boolean;
+      }): void => {
         const el = document.createElement("button");
         el.type = "button";
-        const costMap = new Map<ResourceType, number>(dep.cost);
-        const island: IslandId = getWarehouse(world.state, dep.warehouseId).islandId;
-        const costLabel = dep.cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
+        const costMap = new Map<ResourceType, number>(spec.cost);
+        const island: IslandId = getWarehouse(world.state, spec.payingWarehouseId).islandId;
         el.addEventListener("click", () => {
           // Save-on-command: persist only when the build actually happened; a rejected build
           // (unaffordable) leaves state untouched, so there is nothing to save.
-          if (buildExtractor(world, dep.id, epochAtStart + clock.now())) requestSave?.();
+          if (spec.build(epochAtStart + clock.now())) requestSave?.();
         });
         controls.appendChild(el);
         let lastBuilt: boolean | null = null;
         let lastEnabled: boolean | null = null;
         buttons.push({
           update: (t): void => {
-            const isBuilt = isExtractorBuilt(world, dep.id);
+            const isBuilt = spec.isBuilt();
             const enabled = !isBuilt && canAffordBuild(world.state, t, island, costMap);
             if (isBuilt !== lastBuilt) {
               lastBuilt = isBuilt;
-              el.textContent = isBuilt
-                ? `${dep.label} — extractor built`
-                : `Build extractor · ${dep.label} (${costLabel})`;
+              el.textContent = isBuilt ? spec.builtLabel : spec.buildLabel;
             }
             if (enabled !== lastEnabled) {
               lastEnabled = enabled;
               el.disabled = !enabled;
             }
           },
+        });
+      };
+      for (const dep of world.deposits) {
+        addBuildButton({
+          cost: dep.cost,
+          payingWarehouseId: dep.warehouseId,
+          builtLabel: `${dep.label} — extractor built`,
+          buildLabel: `Build extractor · ${dep.label} (${formatCost(dep.cost)})`,
+          isBuilt: () => isExtractorBuilt(world, dep.id),
+          build: (t) => buildExtractor(world, dep.id, t),
         });
       }
-
-      // One build button per converter site, mirroring the deposit buttons: the refinery is
-      // charged from its source pool's island (both pools share one — buildConverter is
-      // single-island). Caches its cost Map + island once (frame loop must not allocate) and
-      // rewrites its own label/disabled only when the underlying state changes.
+      // The refinery is charged from its source pool's island (both pools share one —
+      // buildConverter is single-island). Site labels name the structure ("Iron Refinery"),
+      // so the build verb stays generic — no hardcoded structure noun for future site kinds.
       for (const site of world.converterSites) {
-        const el = document.createElement("button");
-        el.type = "button";
-        const costMap = new Map<ResourceType, number>(site.cost);
-        const island: IslandId = getWarehouse(world.state, site.srcWarehouseId).islandId;
-        const costLabel = site.cost.map(([resource, amount]) => `${amount} ${resource}`).join(", ");
-        el.addEventListener("click", () => {
-          if (buildConverter(world, site, epochAtStart + clock.now())) requestSave?.();
-        });
-        controls.appendChild(el);
-        let lastBuilt: boolean | null = null;
-        let lastEnabled: boolean | null = null;
-        buttons.push({
-          update: (t): void => {
-            const isBuilt = isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId);
-            const enabled = !isBuilt && canAffordBuild(world.state, t, island, costMap);
-            if (isBuilt !== lastBuilt) {
-              lastBuilt = isBuilt;
-              el.textContent = isBuilt
-                ? `${site.label} — built`
-                : `Build refinery · ${site.label} (${costLabel})`;
-            }
-            if (enabled !== lastEnabled) {
-              lastEnabled = enabled;
-              el.disabled = !enabled;
-            }
-          },
+        addBuildButton({
+          cost: site.cost,
+          payingWarehouseId: site.srcWarehouseId,
+          builtLabel: `${site.label} — built`,
+          buildLabel: `Build ${site.label} (${formatCost(site.cost)})`,
+          isBuilt: () => isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId),
+          build: (t) => buildConverter(world, site, t),
         });
       }
 

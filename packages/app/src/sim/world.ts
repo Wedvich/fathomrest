@@ -8,7 +8,10 @@ import {
   deserializeState,
   forEachConverter,
   forEachExtractor,
+  getDeposit,
+  getWarehouse,
   grantResource,
+  InsufficientStockError,
   offlineElapsedSeconds,
   islandId,
   resourceType,
@@ -28,10 +31,12 @@ export interface DemoWorld {
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly Deposit[];
   converterSites: readonly ConverterSite[];
-  // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or
-  // an upgraded restore, higher when a newer app wrote the loaded save. snapshotWorld
-  // stamps this (never a lower constant), so a stale service-worker-pinned bundle can't
-  // downgrade a newer save's version and trick it into re-running upgrade steps.
+  // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or a
+  // fully-upgraded restore; lower when an upgrade step failed (the version is stamped per
+  // successful step, so the next restore retries the failed one); higher when a newer app
+  // wrote the loaded save. snapshotWorld stamps this (never a lower constant), so a stale
+  // service-worker-pinned bundle can't downgrade a newer save's version and trick it into
+  // re-running the newer app's steps.
   contentVersion: number;
 }
 
@@ -56,7 +61,9 @@ export interface Deposit {
 // type, the build price, and the converter's own cap/ratio. Unlike a Deposit, no core id is
 // carried — the converter doesn't exist until built; "built" is re-derived by matching a live
 // converter's (src, dst) pair (isConverterBuilt), so it survives a save round-trip without a
-// flag. Both pools sit on one island (buildConverter is single-island), which is the island
+// flag. That makes the (src, dst) pair the site's identity: at most ONE site per pool pair —
+// a second recipe on the same pair would flip "built" for both, so it needs a real site id
+// first. Both pools sit on one island (buildConverter is single-island), which is the island
 // the cost is charged against. `cost` is serializable entries matching the core cost vector.
 export interface ConverterSite {
   readonly srcWarehouseId: Id;
@@ -88,6 +95,11 @@ const EXTRACTOR_RATE = 1; // units/s an extractor produces once built
 const WAREHOUSE_CAP = 100;
 const STARTING_STOCK = 30; // seeded into each resource's pool at t=0
 const BUILD_COST = 20; // paid in the *other* resource
+// Iron builds (extractor and refinery) each cost this much wood AND stone. Deliberately above
+// STARTING_STOCK: the seeded 30/30 can never fund an iron build, so the wood/stone extractors
+// (the only income) must be running first — otherwise building the refinery first would strand
+// the bootstrap at 10/10 with zero income (permanent soft-lock).
+const IRON_BUILD_COST = 40;
 
 // Demo world resources and its single starting island — module-level so createDemoWorld and
 // the iron-tier upgrade step build identical content from one source.
@@ -130,11 +142,11 @@ function addIronTier(
 } {
   const ironOrePool = addWarehouse(state, t, IRON_ORE, HOME, WAREHOUSE_CAP);
   const ironIngotPool = addWarehouse(state, t, IRON_INGOT, HOME, WAREHOUSE_CAP);
-  // Iron-ore extractors and the refinery are both paid in wood/stone, gating the tier behind
-  // the base economy (the player must have a wood/stone surplus before refining begins).
+  // Iron-ore extractors and the refinery are both paid in wood/stone (IRON_BUILD_COST each,
+  // above the seeded stock), gating the tier behind a base-economy surplus.
   const ironCost: readonly (readonly [ResourceType, number])[] = [
-    [WOOD, BUILD_COST],
-    [STONE, BUILD_COST],
+    [WOOD, IRON_BUILD_COST],
+    [STONE, IRON_BUILD_COST],
   ];
   return {
     warehouses: [
@@ -269,8 +281,9 @@ export function buildExtractor(world: DemoWorld, depositId: Id, t: number): bool
       deposit.warehouseId,
     );
     return true;
-  } catch {
-    return false; // insufficient stock on the island — retry once resources have accrued
+  } catch (error) {
+    if (error instanceof InsufficientStockError) return false; // retry once stock accrues
+    throw error; // wiring/content bug — never mistake it for "can't afford yet"
   }
 }
 
@@ -291,8 +304,9 @@ export function buildConverter(world: DemoWorld, site: ConverterSite, t: number)
       site.ratio,
     );
     return true;
-  } catch {
-    return false; // insufficient stock on the island — retry once resources have accrued
+  } catch (error) {
+    if (error instanceof InsufficientStockError) return false; // retry once stock accrues
+    throw error; // wiring/content bug — never mistake it for "can't afford yet"
   }
 }
 
@@ -316,26 +330,41 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
     throw new Error(`invalid save contentVersion: ${String(saved.contentVersion)}`);
   }
   const state = deserializeState(saved.doc);
+  // The envelope's view models cross the same untrusted boundary: every core id they carry
+  // must resolve in the deserialized state, or we fail loud into the caller's quarantine path
+  // now — a dangling id would otherwise crash the readout on every reload with the bad save
+  // still in place.
+  for (const deposit of saved.deposits) {
+    getDeposit(state, deposit.id);
+    getWarehouse(state, deposit.warehouseId);
+  }
+  for (const site of saved.converterSites ?? []) {
+    getWarehouse(state, site.srcWarehouseId);
+    getWarehouse(state, site.dstWarehouseId);
+  }
   advance(state, state.epoch + offlineElapsedSeconds(nowMs, state.wallTime));
   let world: DemoWorld = {
     state,
     warehouses: saved.warehouses,
     deposits: saved.deposits,
     converterSites: saved.converterSites ?? [], // absent on a pre-iron-tier (v1) save
-    // max: a save from a newer app keeps its higher version, so re-saving on this stale
-    // bundle never downgrades it into re-running the newer app's steps later.
-    contentVersion: Math.max(savedVersion, WORLD_CONTENT_VERSION),
+    contentVersion: savedVersion,
   };
   // Content upgrades run after offline catch-up (design decision 3): new structures are
   // wired at the restore-time epoch via commands, so they never retroactively produce
-  // across the offline gap. A save at (or past) the current version runs no steps. A
-  // failing step logs and degrades to missing content — a content gap is recoverable,
-  // quarantining (= resetting) a working save is not.
-  for (const step of WORLD_UPGRADES.slice(savedVersion - 1)) {
+  // across the offline gap. A save at (or past) the current version runs no steps, so a
+  // newer app's save keeps its higher version — re-saving on this stale bundle never
+  // downgrades it into re-running the newer app's steps later. The version is stamped per
+  // SUCCESSFUL step: a failing step logs, keeps the version where it was, and skips the
+  // remaining steps (they assume its content), so the next restore retries — a content gap
+  // is recoverable, quarantining (= resetting) a working save is not.
+  const steps = WORLD_UPGRADES.slice(savedVersion - 1);
+  for (const [index, step] of steps.entries()) {
     try {
-      world = step(world, world.state.epoch);
+      world = { ...step(world, world.state.epoch), contentVersion: savedVersion + index + 1 };
     } catch (error) {
-      console.warn("World content upgrade step failed; skipping it.", error);
+      console.warn("World content upgrade step failed; retrying on the next restore.", error);
+      break;
     }
   }
   return world;

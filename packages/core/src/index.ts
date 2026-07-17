@@ -56,6 +56,7 @@ export {
   depositRemainingAt,
   extractorEffectiveRate,
   grantResource,
+  InsufficientStockError,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,

@@ -152,7 +152,9 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
   with a seeded stockpile and no extractors; deposits are worked by cost-gated builds. The
   refinement tier is now layered on top: **iron-ore → iron-ingot** via a single-island
   buildable converter (`buildConverter`), the iron-ore extractor and the refinery both paid
-  in wood/stone so the tier gates behind a base-economy surplus.
+  in wood/stone at a cost above the seeded stockpile, so the tier genuinely gates behind a
+  base-economy surplus — the base extractors must be running before any iron build is
+  affordable (also what makes the t=0 "refinery first" soft-lock unreachable).
 - **Building bootstrap** — the early game is building extractors: cross-resource costs
   (a wood extractor is paid in stone and vice versa) gate later builds behind accumulation.
   Now extends to buildable/costed converters (the iron refinery) through the same layer;
