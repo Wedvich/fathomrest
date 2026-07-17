@@ -4,90 +4,71 @@ Living handoff doc: replaced (not appended) at the end of every working session 
 the concrete next steps. Long-term plans live in DESIGN.md — this is only "what to
 pick up next".
 
-## Done last session
-
-**Adversarial review of the refinement-tier commits (`247be49` + `03bbf79`) + fixes.**
-Nine verified findings (six confirmed, three plausible); eight fixed, one skipped:
-
-- **t=0 soft-lock (the big one):** iron builds (20 wood + 20 stone) were affordable from the
-  30/30 seed, so building the refinery (or iron-ore extractor) first stranded the player at
-  10/10 with zero wood/stone income — permanently. Fixed by `IRON_BUILD_COST = 40` (> seed):
-  both base extractors must be running before any iron build is affordable. This also made
-  the DESIGN.md/world.ts "gates behind a base-economy surplus" claim true (it was false —
-  the conventions finding); DESIGN.md wording updated. Pinned by a gating scenario test.
-- **Upgrade-step version stamping:** `restoreWorld` stamped `contentVersion` to current
-  _before_ running `WORLD_UPGRADES`, so a throwing step re-persisted at v2 with no iron
-  content — permanent loss, contradicting the "recoverable" comment. Now stamped per
-  successful step; a failing step keeps the version where it was, skips the remaining steps,
-  and is retried on the next restore. Test: a sabotaged v1 save (pre-existing home iron-ore
-  pool) stays at v1.
-- **Envelope validation:** `restoreWorld` now resolves every core id the envelope carries
-  (deposit ids/pools, converter-site pools) so a dangling id fails loud into the quarantine
-  path instead of crashing the readout on every reload (was also a pre-existing gap for
-  deposits).
-- **Typed build failure:** new core `InsufficientStockError` thrown by `debitCost`; the
-  world-layer `buildExtractor`/`buildConverter` catch only it and rethrow structural errors
-  (single-island violation, DAG cycle, bad cap/ratio) instead of mislabeling them
-  "insufficient stock". Tests pin both the typed throw and the propagation.
-- **UI dedup:** the deposit and converter build-button loops in `PixiReadout` collapsed into
-  one `addBuildButton` helper (isBuilt/build thunks + labels); converter label no longer
-  hardcodes "Build refinery" (was "Build refinery · Iron Refinery"; now derives from
-  `site.label`).
-- **Documented limit:** the (src, dst) pool pair is a `ConverterSite`'s identity — at most
-  one site per pair; a second recipe on the same pair needs a real site id first (comment on
-  `ConverterSite`).
-- **Skipped (deliberate):** `buildConverter` duplicating `addConverter`'s 3-line placement
-  tail — same symmetric convention as `buildExtractor`/`addExtractor`, extraction not worth
-  the churn. Refuted by the repo's own docs, not fixed: per-frame `isConverterBuilt` scan and
-  `canAffordBuild` island lookup (browser-performance.md's don't-optimize-unprofiled rule),
-  cap/ratio persisted per site (established envelope pattern, same as `Deposit.rate`).
-
-`typecheck | lint | format | build | test` green (101 tests). **Not live-driven this
-session** — the PixiReadout button refactor is typechecked and built but the buttons
-haven't been clicked in a browser since the dedup; worth a quick drive next session.
-
 ## Done this session
 
-**UI drive of the refactored build buttons — done + verified.** Confirmed the extractor and
-refinery build buttons flip/disable correctly in the live app, and that the refinery stays
-disabled at t=0 until the base economy accumulates 40/40. Closes the "not live-driven"
-gap left by the PixiReadout button refactor.
+**Adversarial review of the storage-upgrade changes + all five findings fixed** (24
+candidates from 8 finder angles, verified down to 3 confirmed + 2 plausible):
+
+- **Ladder-reset re-buy tax (the design finding; settled: seed at island cap):** a content
+  step adding a pool at base cap to an already-upgraded island reset the min-derived ladder
+  to rung 1, forcing a full re-buy (540/540 wood/stone) to lift one pool. New
+  `islandStorageCap` helper (min cap across the island's pools); `addIronTier` now seeds new
+  pools at the island's current rung, so future content tiers never reset the ladder.
+  Convention recorded in DESIGN.md; pinned by a restore test on a v1 save with 250 caps
+  (`woodStoneV1Save(poolCap)`).
+- **Frame-loop allocation:** `nextStorageTier` allocated a `.find` closure + `for...of`
+  iterator per frame (banned by browser-performance.md) — now indexed loops, no closures.
+- **Core cleanup:** `upgradeIslandCapacity`'s re-anchor loop now calls `reanchorWarehouse`
+  (the dead `Math.min` dropped; comment notes the re-anchor-before-swap ordering is what's
+  load-bearing).
+- **Button cache:** three interlocking cache vars (NaN/Infinity sentinels, nullable costMap,
+  dead null guard) collapsed to one `lastTier` reference compare — `nextStorageTier` returns
+  a stable `STORAGE_TIERS` element, `undefined` once maxed.
+- **Infinity guard:** `upgradeIslandCapacity` AND `addWarehouse` (identical pre-existing gap)
+  now require `Number.isFinite(capacity)` — Infinity previously produced a save that failed
+  `checkPositive` on the next load (quarantine). Core test walks 0/-1/NaN/Infinity.
+
+`typecheck | lint | format | test` green (107 tests). **Live-driven + verified
+(Playwright/Chromium, headless, persistent profile):** upgrade button disabled at 30/30,
+enabled at 40/40, one click raised all four caps 100→250 with the canvas bar denominators
+re-rendering live, label advanced to "→ 500", stable over ~90 frames, IDB reopen restored
+caps + rung, zero console/page errors. Not reached live: the "storage maxed" label (~4 min
+of accrual; pinned by the ladder-walk test).
 
 ## Next session
 
-**Focus stays single-island. Inter-island (buildable routes) still deferred.**
-
-1. **Storage buildings / capacity command** (deferred from the pool refactor): pool caps are
-   authored constants today. A placeable storage building that raises a pool's capacity is the
-   "pool + capacity buildings" model the grill settled on — fold into the costed-builds layer.
-   Now more pressing: with the refinery capping iron-ingot at 100 and no on-island sink beyond
-   it, the ingot pool jams — capacity/consumption is the next real depth lever.
-2. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge
-   as the first global-scoped resource (global capped pool, observatory extractor on a
-   knowledge deposit) → timed research queue (depth 2, paid at enqueue) → thin unlock tree.
+1. **Repo-resident browser-drive setup (do this first).** The post-commit live drive (dev
+   server + Playwright/Chromium) has been hand-rolled from a throwaway tmp dir two sessions
+   in a row; it's the standard "verify what we just did" step after every commit, so make it
+   repeatable in-repo:
+   - Playwright as a devDependency (app package or a small tools workspace); browser install
+     via `bunx playwright install chromium`; run the driver with **node, not bun**.
+   - A committed drive script covering this session's proven flow: fresh persistent profile →
+     assert storage button disabled at 30/30 → click both base extractor buttons → wait for
+     enable (~15s) → click upgrade → assert label "→ 500" + disabled → screenshots → close and
+     reopen the same profile → assert restored caps/rung. Working version (recoverable if tmp
+     was cleaned: rewrite from this description) at
+     `~/.claude/jobs/0d20a627/tmp/pw/drive.mjs`.
+   - A project skill under `.claude/skills/` so `/run` finds it (`/run-skill-generator` can
+     scaffold): launch recipe (`bun run --filter '@fathomrest/app' dev`, port 5173), driver
+     invocation, and the key caveat — pool readouts are Pixi **canvas** text, so verify bars
+     via screenshots; only the buttons are DOM-assertable.
+   - Keep it a drive (verification harness), not a test suite — Vitest already owns the
+     scenario coverage.
+2. **Research track** (grilled 2026-07-17, settled in DESIGN.md "Progression"): knowledge as
+   the first global-scoped resource (global capped pool, observatory extractor on a knowledge
+   deposit) → timed research queue (depth 2, paid at enqueue) → thin unlock tree. Note: the
+   storage upgrade shipped cost-gated only; research-gating it (DESIGN.md unlock category
+   "in-place building upgrades") is a later layer once research exists.
 3. **Island XP + skill tree**: throughput-fed XP accumulator (own stored quantity), levels,
    trunk + Extraction/Refinement branches; junction research-gated; nodes instant, paid in
    island-local resources.
-4. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency.
+4. **Building pillar depth** (DESIGN.md active half): fixed slots, siting/adjacency. This is
+   what makes "placeable storage building" distinct from the island upgrade shipped now — the
+   ladder can re-skin onto slotted placeables once slots exist.
 
-Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
-the mechanism for networking island pools. Pick up once single-island depth is proven.
+Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) — the
+mechanism for networking island pools. Pick up once single-island depth is proven.
 
 Carried over: the PWA service worker pins old bundles until the update prompt is accepted —
 rebuild `packages/app/dist/` before serving it anywhere.
-
-Engine follow-ups (do when they start to matter):
-
-- `removeExtractor` / `removeRoute` / `removeConverter` (entity deletion generally) — needed
-  once the UI lets players tear down structures. Converters are now buildable, so a
-  `removeConverter` is the first one players will reach for. One table-deletion function per
-  module and a `deriveAll` after.
-- Multi-input (Leontief) recipes (`iron + coal → steel`) are **explicitly deferred**: they
-  turn 2-endpoint edges into fixed-proportion nodes and break the clean ≤ 2·N sweep proof.
-  ADR-first effort, only after single-input refinement is proven in play.
-- `solveTransfers` rebuilds adjacency + topo order and re-solves the whole graph every
-  event/command (global O(N+E)). Fine at design scale; the natural place for targeted
-  invalidation if a profile ever shows it.
-- Stale events linger in the heap until their time passes (lazy deletion); the serializer
-  filters them. Consider periodic compaction only if heap size ever matters during very
-  long offline spans.

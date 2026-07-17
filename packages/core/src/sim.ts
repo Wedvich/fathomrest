@@ -591,8 +591,8 @@ export function addWarehouse(
   if (island.length === 0) {
     throw new Error("warehouse island must be a non-empty tag");
   }
-  if (!(capacity > 0)) {
-    throw new Error(`warehouse capacity must be > 0, got ${capacity}`);
+  if (!Number.isFinite(capacity) || !(capacity > 0)) {
+    throw new Error(`warehouse capacity must be finite and > 0, got ${capacity}`);
   }
   // One warehouse per (island, resource): an island holds a single pool for each resource,
   // so every extractor of a type feeds one bar and a build debits one pool (islandWarehouse,
@@ -814,6 +814,36 @@ export function setWarehousePullRate(state: SimState, t: number, id: Id, pullRat
   // deriveAll re-anchors with the OLD cached netRate before recomputing against the
   // new pull, so mutating first is safe.
   warehouse.pullRate = pullRate;
+  deriveAll(state);
+}
+
+// Player upgrade command: pay `cost` from the island, then raise EVERY pool on that island to at
+// least `capacity`, atomically — the tiered island-warehouse upgrade. Storage is an island-level
+// building (DESIGN.md): one upgrade lifts the whole island's caps together, not a single resource
+// pool. Same validate -> advance -> debit -> mutate -> deriveAll shape as buildExtractor; the cost
+// is debited ONCE. Raise-only (Math.max): a pool already above the target keeps its cap, so a
+// higher pool is never clamped down (no stock loss) when caps have diverged (e.g. a later content
+// tier adds pools at the base cap). Each pool is re-anchored into its new cap BEFORE the swap
+// (clampedAmount reads the old cap) so stored anchors stay within [0, capacity] (the import
+// invariant); deriveAll re-solves, unpinning any pool that was jammed at the old cap.
+export function upgradeIslandCapacity(
+  state: SimState,
+  t: number,
+  cost: ReadonlyMap<ResourceType, number>,
+  island: IslandId,
+  capacity: number,
+): void {
+  if (!Number.isFinite(capacity) || !(capacity > 0)) {
+    throw new Error(`warehouse capacity must be finite and > 0, got ${capacity}`);
+  }
+  advance(state, t);
+  debitCost(state, t, island, cost);
+  for (const warehouse of state.warehouses.values()) {
+    if (warehouse.islandId !== island) continue;
+    const raised = Math.max(warehouse.capacity, capacity);
+    reanchorWarehouse(warehouse, t); // reads the OLD cap — the ordering, not a clamp, keeps anchors in range
+    warehouse.capacity = raised;
+  }
   deriveAll(state);
 }
 

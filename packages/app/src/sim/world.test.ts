@@ -4,6 +4,7 @@ import {
   advance,
   createSimState,
   deserializeState,
+  getWarehouse,
   grantResource,
   islandId,
   resourceType,
@@ -20,9 +21,11 @@ import {
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
+  nextStorageTier,
   restoreWorld,
   type SavedWorld,
   snapshotWorld,
+  upgradeStorage,
   WORLD_CONTENT_VERSION,
 } from "./world.ts";
 
@@ -121,6 +124,74 @@ describe("wood/stone build bootstrap", () => {
   });
 });
 
+// The tiered island-warehouse upgrade: storage is island-level, so one upgrade lifts every pool's
+// cap together. The current rung is derived from the island's live core caps (no persisted index),
+// so it advances after a purchase and survives a round-trip. Drives the real core upgrade command,
+// no mocks.
+describe("storage capacity upgrade", () => {
+  const HOME = islandId("home");
+
+  it("lifts every island pool's cap together, advances the ladder, and survives a round-trip", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(world);
+
+    // Build both base extractors so wood and stone each accrue 2/s (wood 30->10 paying stone's
+    // build, stone 30->10 paying wood's).
+    expect(buildExtractor(world, woodA.id, 0)).toBe(true);
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
+
+    // Tier 1 (cap 250) costs 40 wood + 40 stone; from 10 each at 2/s that's affordable by t=15.
+    expect(nextStorageTier(world, HOME)?.capacity).toBe(250);
+    expect(upgradeStorage(world, HOME, 10)).toBe(false); // only 30 each at t=10
+    advance(world.state, 15);
+    expect(upgradeStorage(world, HOME, 15)).toBe(true);
+
+    // ONE upgrade raised every home pool (wood, stone, iron-ore, iron-ingot), not just one.
+    for (const wh of world.warehouses) {
+      expect(getWarehouse(world.state, wh.id).capacity).toBe(250);
+    }
+    expect(nextStorageTier(world, HOME)?.capacity).toBe(500); // ladder advanced past tier 1
+
+    world.state.wallTime = 0;
+    const restored = restoreWorld(structuredClone(snapshotWorld(world)), 0);
+    for (const wh of restored.warehouses) {
+      expect(getWarehouse(restored.state, wh.id).capacity).toBe(250);
+    }
+    expect(nextStorageTier(restored, HOME)?.capacity).toBe(500); // derived, not persisted
+  });
+
+  it("walks the ladder to the top and then refuses further upgrades", () => {
+    const world = createDemoWorld(1, 0);
+    const [woodWh, stoneWh] = world.warehouses;
+    if (!woodWh || !stoneWh) throw new Error("demo warehouse shape changed");
+
+    // A single island upgrade lifts all caps together, so no per-pool lockstep is needed — just
+    // flood the wood/stone cost pools before each rung (grants clamp to the current cap).
+    for (const target of [250, 500, 1_000]) {
+      grantResource(world.state, 0, woodWh.id, 2_000);
+      grantResource(world.state, 0, stoneWh.id, 2_000);
+      expect(upgradeStorage(world, HOME, 0)).toBe(true);
+      for (const wh of world.warehouses) {
+        expect(getWarehouse(world.state, wh.id).capacity).toBe(target);
+      }
+    }
+
+    expect(nextStorageTier(world, HOME)).toBeUndefined();
+    expect(upgradeStorage(world, HOME, 0)).toBe(false); // maxed: nothing to buy
+  });
+
+  it("seeds content-step pools at the island's current rung instead of resetting the ladder", () => {
+    // A v1 (pre-iron) save whose island storage sits at 250: the iron upgrade step's new pools
+    // arrive at the island's rung (islandStorageCap), so the ladder offers 500 next rather than
+    // dropping back to rung 1 and re-charging rungs the player already bought.
+    const restored = restoreWorld(woodStoneV1Save(250), 0);
+    for (const wh of restored.warehouses) {
+      expect(getWarehouse(restored.state, wh.id).capacity).toBe(250);
+    }
+    expect(nextStorageTier(restored, HOME)?.capacity).toBe(500);
+  });
+});
+
 // The content-version framework plus the one-time reset that discards pre-pivot ore/ingot
 // saves. Real app restore path, no mocks.
 describe("restore versioning and the one-time reset", () => {
@@ -167,13 +238,13 @@ describe("restore versioning and the one-time reset", () => {
 // A pre-iron (contentVersion 1) envelope as the wood/stone-only app wrote it: wood + stone pools
 // and their four deposits, no iron tier, no converterSites. Built through the core surface so the
 // upgrade step restores against a genuine older save rather than a doctored fresh one.
-function woodStoneV1Save(): SavedWorld {
+function woodStoneV1Save(poolCap = 100): SavedWorld {
   const state = createSimState(1, 0);
   const home = islandId("home");
   const wood = resourceType("wood");
   const stone = resourceType("stone");
-  const woodPool = addWarehouse(state, 0, wood, home, 100);
-  const stonePool = addWarehouse(state, 0, stone, home, 100);
+  const woodPool = addWarehouse(state, 0, wood, home, poolCap);
+  const stonePool = addWarehouse(state, 0, stone, home, poolCap);
   const woodCost: readonly (readonly [ResourceType, number])[] = [[stone, 20]];
   const stoneCost: readonly (readonly [ResourceType, number])[] = [[wood, 20]];
   const vein = (

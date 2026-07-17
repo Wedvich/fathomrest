@@ -28,9 +28,13 @@ import {
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
+  nextStorageTier,
   restoreWorld,
   type SavedWorld,
   snapshotWorld,
+  type StorageTier,
+  upgradeStorage,
+  worldIslands,
 } from "./sim/world.ts";
 import { createSimClock } from "./simClock.ts";
 
@@ -243,12 +247,17 @@ export function PixiReadout(): React.JSX.Element {
 
       world.warehouses.forEach((wh, i) => {
         const { fill, readout } = makeBar(wh.label, i, 0x3fa7d6);
-        const capacity = getWarehouse(world.state, wh.id).capacity;
+        // Hold the component reference: commands mutate its fields in place (capacity is raised
+        // by a storage upgrade), so reading warehouse.capacity each tick picks that up without a
+        // per-frame Map lookup.
+        const warehouse = getWarehouse(world.state, wh.id);
         let lastFrac = NaN;
         let lastAmount = NaN;
         let lastOut = NaN;
+        let lastCapacity = NaN;
         rows.push({
           update: (t): void => {
+            const capacity = warehouse.capacity;
             const amount = warehouseAmountAt(world.state, wh.id, t);
             const frac = capacity > 0 ? amount / capacity : 0;
             if (frac !== lastFrac) {
@@ -261,9 +270,14 @@ export function PixiReadout(): React.JSX.Element {
             // float error so a logical 2 at 1.9999999999 doesn't floor to 1.
             const roundedAmount = Math.floor(amount + 1e-9);
             const roundedOut = Math.round(out * 10) / 10;
-            if (roundedAmount !== lastAmount || roundedOut !== lastOut) {
+            if (
+              roundedAmount !== lastAmount ||
+              roundedOut !== lastOut ||
+              capacity !== lastCapacity
+            ) {
               lastAmount = roundedAmount;
               lastOut = roundedOut;
+              lastCapacity = capacity;
               readout.text = `${roundedAmount} / ${capacity}  (−${roundedOut.toFixed(1)}/s)`;
             }
           },
@@ -363,6 +377,44 @@ export function PixiReadout(): React.JSX.Element {
           buildLabel: `Build ${site.label} (${formatCost(site.cost)})`,
           isBuilt: () => isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId),
           build: (t) => buildConverter(world, site, t),
+        });
+      }
+
+      // Storage upgrade buttons: one per ISLAND (storage is island-level — one upgrade lifts every
+      // pool's cap together), distinct from the binary build buttons because the ladder is
+      // multi-tier — the label and cost change with each purchase and end at "maxed".
+      // nextStorageTier returns a stable STORAGE_TIERS element (undefined once maxed), so a
+      // reference compare is the dirty check: the label and cost Map are rebuilt only when the
+      // tier changes (after an upgrade), not per frame (perf doc: the frame loop must not
+      // allocate).
+      for (const island of worldIslands(world)) {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.addEventListener("click", () => {
+          if (upgradeStorage(world, island, epochAtStart + clock.now())) requestSave?.();
+        });
+        controls.appendChild(el);
+        let lastTier: StorageTier | undefined | null = null; // null: no frame rendered yet
+        let costMap = new Map<ResourceType, number>();
+        let lastEnabled: boolean | null = null;
+        buttons.push({
+          update: (t): void => {
+            const tier = nextStorageTier(world, island);
+            if (tier !== lastTier) {
+              lastTier = tier;
+              if (tier === undefined) {
+                el.textContent = `${island} storage maxed`;
+              } else {
+                costMap = new Map(tier.cost);
+                el.textContent = `Upgrade ${island} storage → ${tier.capacity} (${formatCost(tier.cost)})`;
+              }
+            }
+            const enabled = tier !== undefined && canAffordBuild(world.state, t, island, costMap);
+            if (enabled !== lastEnabled) {
+              lastEnabled = enabled;
+              el.disabled = !enabled;
+            }
+          },
         });
       }
 

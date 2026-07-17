@@ -136,12 +136,22 @@ ingredients, never structural edges into the island trees.
   lifetime-extracted) so activity XP, milestone XP, and research-unlocked passive
   XP stay addable later without migration.
 - **Nodes are instant** and cost **island-local resources** through the normal
-  build-cost path — levels gate *when* a node may be bought, stockpiles gate
-  *whether it's affordable now*. No skill-point currency. (Node costs must fit
+  build-cost path — levels gate _when_ a node may be bought, stockpiles gate
+  _whether it's affordable now_. No skill-point currency. (Node costs must fit
   under pool caps — coupled to storage progression, accepted.)
 - **Buildings are the lever, nodes are the multiplier**: anything that occupies a
-  slot stays a building (storage buildings add flat capacity); skill nodes give
-  percentage/rule bonuses and never substitute for a placeable.
+  slot stays a building (storage adds flat capacity); skill nodes give
+  percentage/rule bonuses and never substitute for a placeable. **Storage ships as a
+  tiered island-warehouse upgrade** — storage is **island-level, not per resource
+  pool**: one upgrade (`upgradeIslandCapacity`, a costed build verb) lifts every pool
+  on the island to the next rung of an authored ladder in a single command, cost
+  charged once. The current rung is derived from the island's live pool caps (min, so
+  a lagging pool is pulled up first) so it round-trips without a persisted index; the
+  command is raise-only (never clamps a higher pool down). Content steps that add a
+  pool to an existing island seed it at the island's current rung, so a later content
+  tier never resets the ladder or re-charges already-bought rungs. Until building **slots**
+  exist, a "placeable storage building" and this island cap-raise are mechanically
+  equivalent; the placeable/slot framing is reconciled when the slot pillar lands.
 
 All tree content is app-authored data over generic core primitives (timed-unlock
 queue, XP accumulator, gate predicates) — reconfigurable via content edits +
@@ -212,7 +222,9 @@ Test every pillar at minimum depth; if this isn't fun, content won't fix it.
   affordable (also what makes the t=0 "refinery first" soft-lock unreachable).
 - **Building bootstrap** — the early game is building extractors: cross-resource costs
   (a wood extractor is paid in stone and vice versa) gate later builds behind accumulation.
-  Now extends to buildable/costed converters (the iron refinery) through the same layer;
+  Now extends to buildable/costed converters (the iron refinery) and to tiered island-warehouse
+  capacity upgrades (`upgradeIslandCapacity`, island-level — one upgrade lifts all the island's
+  pool caps) through the same cost layer;
   buildable/costed routes wait for inter-island work (a same-resource route is inter-island
   by construction under the one-pool invariant).
 - ~20-node research tree + island skill trees (shared trunk + Extraction/Refinement

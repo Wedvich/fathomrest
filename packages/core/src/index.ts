@@ -60,6 +60,7 @@ export {
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
+  upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,
 } from "./sim.ts";

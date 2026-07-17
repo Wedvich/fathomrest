@@ -8,6 +8,7 @@ import {
   deserializeState,
   forEachConverter,
   forEachExtractor,
+  forEachWarehouse,
   getDeposit,
   getWarehouse,
   grantResource,
@@ -16,6 +17,7 @@ import {
   islandId,
   resourceType,
   serializeState,
+  upgradeIslandCapacity as upgradeIslandCapacityCmd,
   type Id,
   type IslandId,
   type ResourceType,
@@ -113,6 +115,44 @@ const IRON_INGOT = resourceType("iron-ingot");
 const CONVERTER_CAP = 2;
 const CONVERTER_RATIO = 0.5;
 
+// One rung of the storage-upgrade ladder: raise a pool's capacity to `capacity` for `cost`.
+export interface StorageTier {
+  readonly capacity: number;
+  readonly cost: readonly (readonly [ResourceType, number])[];
+}
+
+// The island-warehouse upgrade ladder (placeholder tuning, DESIGN.md vertical slice): each rung
+// raises every pool on an island to `capacity` from the WAREHOUSE_CAP base, paid in wood/stone
+// like every other build. Storage is island-level, so one rung lifts all the island's caps
+// together (including the wood/stone cost pools). The current rung isn't stored — it's derived
+// from the island's live pool caps (core is source of truth, like isExtractorBuilt), so it
+// round-trips without a persisted index; the next offered rung is the first above what the
+// island holds now. Each rung's cost stays under the previous rung's cap so it's reachable once
+// the one before it is bought (DESIGN.md: build costs coupled to storage progression).
+const STORAGE_TIERS: readonly StorageTier[] = [
+  {
+    capacity: 250,
+    cost: [
+      [WOOD, 40],
+      [STONE, 40],
+    ],
+  },
+  {
+    capacity: 500,
+    cost: [
+      [WOOD, 150],
+      [STONE, 150],
+    ],
+  },
+  {
+    capacity: 1000,
+    cost: [
+      [WOOD, 350],
+      [STONE, 350],
+    ],
+  },
+];
+
 // The rich vein every demo deposit shares: a 500-unit tier at ×2 depleting to a 0.5 perpetual
 // floor (mirrors the earlier placeholder).
 function addDemoDeposit(
@@ -125,6 +165,19 @@ function addDemoDeposit(
 ): Deposit {
   const id = addDeposit(state, t, resource, [{ amount: 500, multiplier: 2 }], 0.5);
   return { id, warehouseId, label, resource, cost, rate: EXTRACTOR_RATE };
+}
+
+// The cap a NEW pool takes when a content step lands it on an existing island: the island's
+// current storage rung (min cap across its pools, matching nextStorageTier's derivation). A
+// content tier added to an already-upgraded save then arrives at the island's rung instead of
+// resetting the ladder to rung 1 and re-charging rungs the player already bought. Base cap on an
+// island with no pools yet (fresh world).
+function islandStorageCap(state: SimState, island: IslandId): number {
+  let cap = Infinity;
+  forEachWarehouse(state, (_id, warehouse) => {
+    if (warehouse.islandId === island) cap = Math.min(cap, warehouse.capacity);
+  });
+  return cap === Infinity ? WAREHOUSE_CAP : cap;
 }
 
 // The iron refinement tier layered on the wood/stone base: an iron-ore pool worked by two
@@ -140,8 +193,9 @@ function addIronTier(
   deposits: Deposit[];
   converterSites: ConverterSite[];
 } {
-  const ironOrePool = addWarehouse(state, t, IRON_ORE, HOME, WAREHOUSE_CAP);
-  const ironIngotPool = addWarehouse(state, t, IRON_INGOT, HOME, WAREHOUSE_CAP);
+  const poolCap = islandStorageCap(state, HOME);
+  const ironOrePool = addWarehouse(state, t, IRON_ORE, HOME, poolCap);
+  const ironIngotPool = addWarehouse(state, t, IRON_INGOT, HOME, poolCap);
   // Iron-ore extractors and the refinery are both paid in wood/stone (IRON_BUILD_COST each,
   // above the seeded stock), gating the tier behind a base-economy surplus.
   const ironCost: readonly (readonly [ResourceType, number])[] = [
@@ -303,6 +357,52 @@ export function buildConverter(world: DemoWorld, site: ConverterSite, t: number)
       site.cap,
       site.ratio,
     );
+    return true;
+  } catch (error) {
+    if (error instanceof InsufficientStockError) return false; // retry once stock accrues
+    throw error; // wiring/content bug — never mistake it for "can't afford yet"
+  }
+}
+
+// The distinct islands present in the world, derived from the pools (core is source of truth).
+// One island = one upgradable warehouse (storage is island-level, not per resource pool).
+export function worldIslands(world: DemoWorld): readonly IslandId[] {
+  const seen = new Set<IslandId>();
+  for (const wh of world.warehouses) seen.add(getWarehouse(world.state, wh.id).islandId);
+  return [...seen];
+}
+
+// The next storage upgrade an island can buy, or undefined at max tier. Derived from the island's
+// live pool caps (core is source of truth), so it survives a round-trip without a persisted index:
+// the first ladder rung above the island's smallest pool cap (min, so a lagging pool — e.g. one a
+// later content tier added at the base cap — is pulled up before the ladder advances).
+export function nextStorageTier(world: DemoWorld, island: IslandId): StorageTier | undefined {
+  let currentCap = Infinity;
+  // Called per frame from the storage-button update — indexed loops, no closures
+  // (browser-performance.md: the frame loop must not allocate).
+  for (let i = 0; i < world.warehouses.length; i++) {
+    const wh = world.warehouses[i];
+    if (wh === undefined) continue;
+    const warehouse = getWarehouse(world.state, wh.id);
+    if (warehouse.islandId === island) currentCap = Math.min(currentCap, warehouse.capacity);
+  }
+  if (currentCap === Infinity) return undefined; // no pools on this island
+  for (let i = 0; i < STORAGE_TIERS.length; i++) {
+    const tier = STORAGE_TIERS[i];
+    if (tier !== undefined && tier.capacity > currentCap) return tier;
+  }
+  return undefined;
+}
+
+// Upgrade an island's storage to its next tier at sim time t, paying the tier cost from that
+// island (core upgradeIslandCapacity advances to t, debits once, then raises every island pool's
+// cap in one command). Returns false if already at max tier or the cost can't be met yet (the UI
+// disables the button until canAffordBuild — this is the backstop).
+export function upgradeStorage(world: DemoWorld, island: IslandId, t: number): boolean {
+  const tier = nextStorageTier(world, island);
+  if (tier === undefined) return false;
+  try {
+    upgradeIslandCapacityCmd(world.state, t, new Map(tier.cost), island, tier.capacity);
     return true;
   } catch (error) {
     if (error instanceof InsufficientStockError) return false; // retry once stock accrues

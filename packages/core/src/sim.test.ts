@@ -24,6 +24,7 @@ import {
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
+  upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,
 } from "./sim.ts";
@@ -555,6 +556,75 @@ describe("resource-costed converter builds", () => {
     expect(() =>
       buildConverter(state, 0, new Map([[ore, 20]]), orePool, ingotPool, 4, 0.5),
     ).toThrow(InsufficientStockError);
+  });
+});
+
+describe("storage capacity upgrade", () => {
+  const ingot = resourceType("ingot");
+  const ore = resourceType("ore");
+  const wood = resourceType("wood");
+  const home = islandId("home");
+  const other = islandId("other");
+
+  // Home island with three pools: an ingot pool capped at 100 and fed 10/s (full and pinned by
+  // t=10), an empty ore pool at 100, and a wood pool (cap 1_000) seeded to 200 to pay the upgrade.
+  // Plus a same-resource pool on ANOTHER island that the home upgrade must leave alone.
+  function islandFixture(): {
+    state: SimState;
+    ingotPool: ReturnType<typeof addWarehouse>;
+    orePool: ReturnType<typeof addWarehouse>;
+    woodPool: ReturnType<typeof addWarehouse>;
+    offPool: ReturnType<typeof addWarehouse>;
+  } {
+    const state = createSimState(42, 0);
+    const ingotDeposit = addDeposit(state, 0, ingot, [], 1);
+    const ingotPool = addWarehouse(state, 0, ingot, home, 100);
+    addExtractor(state, 0, 10, ingotDeposit, ingotPool); // full at t=10, then pinned
+    const orePool = addWarehouse(state, 0, ore, home, 100);
+    const woodPool = addWarehouse(state, 0, wood, home, 1_000);
+    grantResource(state, 0, woodPool, 200);
+    const offPool = addWarehouse(state, 0, ingot, other, 100);
+    return { state, ingotPool, orePool, woodPool, offPool };
+  }
+
+  it("raises every pool on the island, debits once, and unpins a jammed pool", () => {
+    const { state, ingotPool, orePool, woodPool, offPool } = islandFixture();
+    // Pinned full at cap 100 — no headroom for the 10/s producer.
+    expect(warehouseAmountAt(state, ingotPool, 20)).toBeCloseTo(100, 9);
+
+    upgradeIslandCapacity(state, 20, new Map([[wood, 80]]), home, 250);
+
+    // Every home pool rises to 250, except the wood pool already above it (raise-only, untouched).
+    expect(getWarehouse(state, ingotPool).capacity).toBe(250);
+    expect(getWarehouse(state, orePool).capacity).toBe(250);
+    expect(getWarehouse(state, woodPool).capacity).toBe(1_000);
+    expect(getWarehouse(state, offPool).capacity).toBe(100); // other island untouched
+    // The cost is debited exactly once from the island: 200 - 80 = 120.
+    expect(warehouseAmountAt(state, woodPool, 20)).toBeCloseTo(120, 9);
+    // The 100 held ingot is preserved, then fills again at 10/s toward the new 250 cap.
+    expect(warehouseAmountAt(state, ingotPool, 30)).toBeCloseTo(200, 9);
+    expect(warehouseAmountAt(state, ingotPool, 40)).toBeCloseTo(250, 9); // re-pinned at the new cap
+  });
+
+  it("throws InsufficientStockError and leaves every cap and stock untouched when unaffordable", () => {
+    const { state, ingotPool, orePool, woodPool } = islandFixture();
+    expect(() => upgradeIslandCapacity(state, 20, new Map([[wood, 500]]), home, 250)).toThrow(
+      InsufficientStockError,
+    );
+    expect(getWarehouse(state, ingotPool).capacity).toBe(100);
+    expect(getWarehouse(state, orePool).capacity).toBe(100);
+    expect(warehouseAmountAt(state, woodPool, 20)).toBeCloseTo(200, 9);
+  });
+
+  it("rejects a non-positive or non-finite capacity before charging anything", () => {
+    const { state, ingotPool, woodPool } = islandFixture();
+    for (const bad of [0, -1, Number.NaN, Infinity]) {
+      expect(() => upgradeIslandCapacity(state, 20, new Map([[wood, 10]]), home, bad)).toThrow(
+        /capacity must be finite and > 0/,
+      );
+    }
+    expect(getWarehouse(state, ingotPool).capacity).toBe(100);
+    expect(warehouseAmountAt(state, woodPool, 20)).toBeCloseTo(200, 9);
   });
 });
 
