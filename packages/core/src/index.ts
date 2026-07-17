@@ -47,6 +47,7 @@ export {
   addRoute,
   addWarehouse,
   advance,
+  buildConverter,
   buildExtractor,
   canAffordBuild,
   converterDraw,

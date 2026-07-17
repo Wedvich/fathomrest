@@ -11,6 +11,7 @@ import {
   addRoute,
   addWarehouse,
   advance,
+  buildConverter,
   buildExtractor,
   canAffordBuild,
   converterDraw,
@@ -502,6 +503,47 @@ describe("resource-costed building", () => {
       [stone, 100],
     ]);
     expect(() => buildExtractor(state, 10, cost, 5, stoneDeposit, quarry)).toThrow(/insufficient/);
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
+  });
+});
+
+describe("resource-costed converter builds", () => {
+  const ore = resourceType("ore");
+  const ingot = resourceType("ingot");
+  const home = islandId("home");
+  const other = islandId("other");
+
+  // Home island: an ore pool fed at 6/s (60 by t=10) to both pay the build and feed the
+  // converter, plus an empty ingot pool to refine into.
+  function refineryIsland(): {
+    state: SimState;
+    orePool: ReturnType<typeof addWarehouse>;
+    ingotPool: ReturnType<typeof addWarehouse>;
+  } {
+    const state = createSimState(42, 0);
+    const oreDeposit = addDeposit(state, 0, ore, [], 1);
+    const orePool = addWarehouse(state, 0, ore, home, 1_000);
+    addExtractor(state, 0, 6, oreDeposit, orePool); // 60 by t=10
+    const ingotPool = addWarehouse(state, 0, ingot, home, 1_000);
+    return { state, orePool, ingotPool };
+  }
+
+  it("debits the build cost from the island pool and wires the refining converter", () => {
+    const { state, orePool, ingotPool } = refineryIsland();
+    buildConverter(state, 10, new Map([[ore, 20]]), orePool, ingotPool, 4, 0.5);
+    // 60 ore at t=10, less the 20 charge -> 40 left; the converter then draws 4 ore/s and feeds
+    // 4·0.5 = 2 ingot/s, while the extractor keeps adding 6 ore/s (net +2 ore/s in the pool).
+    expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(40, 9);
+    expect(warehouseAmountAt(state, ingotPool, 20)).toBeCloseTo(20, 9);
+    expect(warehouseAmountAt(state, orePool, 20)).toBeCloseTo(60, 9);
+  });
+
+  it("rejects endpoints on different islands without touching stock (atomic)", () => {
+    const { state, orePool } = refineryIsland();
+    const offIsland = addWarehouse(state, 0, ingot, other, 1_000);
+    expect(() =>
+      buildConverter(state, 10, new Map([[ore, 20]]), orePool, offIsland, 4, 0.5),
+    ).toThrow(/share an island/);
     expect(warehouseAmountAt(state, orePool, 10)).toBeCloseTo(60, 9);
   });
 });

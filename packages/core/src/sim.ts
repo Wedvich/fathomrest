@@ -859,19 +859,19 @@ export function setRouteCap(state: SimState, t: number, id: Id, cap: number): vo
   deriveAll(state);
 }
 
-// Refinement command: wire a converter that consumes the source's resource and produces
-// the destination's. The endpoint resources must DIFFER — a same-type "converter" would
-// be a lossy/gainy route bypassing route conservation (DESIGN.md: changing type is
-// refinement's job, never a route's). Same validate -> advance -> mutate -> deriveAll
-// shape as addRoute; rides the same combined transfer DAG.
-export function addConverter(
+// Shared converter wiring validation: distinct endpoints, valid cap/ratio, both warehouses
+// exist, and endpoint resources DIFFER. A same-type "converter" would be a lossy/gainy route
+// bypassing route conservation (DESIGN.md: changing type is refinement's job, never a route's).
+// Rides the same combined transfer DAG as routes, so the proposed edge must keep it acyclic.
+// Returns both warehouses (buildConverter reads their island for the single-island check and
+// the cost debit).
+function checkConverterWiring(
   state: SimState,
-  t: number,
   srcId: Id,
   dstId: Id,
   cap: number,
   ratio: number,
-): Id {
+): { src: Warehouse; dst: Warehouse } {
   if (srcId === dstId) {
     throw new Error(`converter source and destination must differ, got ${srcId}`);
   }
@@ -887,7 +887,50 @@ export function addConverter(
     );
   }
   assertTransfersAcyclic(state, srcId, dstId, "converter");
+  return { src, dst };
+}
+
+// Refinement command: wire a converter that consumes the source's resource and produces the
+// destination's. Same validate -> advance -> mutate -> deriveAll shape as addRoute.
+export function addConverter(
+  state: SimState,
+  t: number,
+  srcId: Id,
+  dstId: Id,
+  cap: number,
+  ratio: number,
+): Id {
+  checkConverterWiring(state, srcId, dstId, cap, ratio);
   advance(state, t);
+  const id = allocId(state);
+  setConverter(state, id, createConverter(srcId, dstId, cap, ratio));
+  deriveAll(state);
+  return id;
+}
+
+// Player build command: pay `cost` from the converter's island, then place it, atomically.
+// Same validate -> advance -> mutate -> derive shape as buildExtractor, but resources leave
+// stock and the converter appears in one command at t. A converter is single-island by
+// construction — both endpoints must sit on the same island (island.ts), which is the island
+// the cost is charged against; that on-island refined consumer is what keeps built pools from
+// capping out and jamming. (buildRoute — the inter-island equivalent — is deferred.)
+export function buildConverter(
+  state: SimState,
+  t: number,
+  cost: ReadonlyMap<ResourceType, number>,
+  srcId: Id,
+  dstId: Id,
+  cap: number,
+  ratio: number,
+): Id {
+  const { src, dst } = checkConverterWiring(state, srcId, dstId, cap, ratio);
+  if (src.islandId !== dst.islandId) {
+    throw new Error(
+      `converter endpoints must share an island: source on ${src.islandId}, destination on ${dst.islandId}`,
+    );
+  }
+  advance(state, t);
+  debitCost(state, t, src.islandId, cost);
   const id = allocId(state);
   setConverter(state, id, createConverter(srcId, dstId, cap, ratio));
   deriveAll(state);
