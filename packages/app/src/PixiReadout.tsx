@@ -17,6 +17,7 @@ import {
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { useEffect, useRef } from "react";
 
+import { displayCeil, displayFloor } from "./sim/display.ts";
 import type { SimSession } from "./sim/session.ts";
 import {
   buildConverter,
@@ -184,10 +185,7 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
               setFrac(fill, frac);
             }
             const out = warehouseOutflowRate(world.state, wh.id);
-            // Floor stock, ceil deposits: never show a resource the player can't spend, never
-            // show a deposit as empty while it still has remainder. Epsilon absorbs analytic
-            // float error so a logical 2 at 1.9999999999 doesn't floor to 1.
-            const roundedAmount = Math.floor(amount + 1e-9);
+            const roundedAmount = displayFloor(amount);
             const roundedOut = Math.round(out * 10) / 10;
             if (
               roundedAmount !== lastAmount ||
@@ -221,7 +219,7 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
               setFrac(fill, frac);
             }
             const mult = depositMultiplier(world.state, dep.id);
-            const roundedRemaining = Math.ceil(remaining - 1e-9);
+            const roundedRemaining = displayCeil(remaining);
             if (roundedRemaining !== lastRemaining || mult !== lastMult) {
               lastRemaining = roundedRemaining;
               lastMult = mult;
@@ -295,9 +293,7 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
               setFrac(fill, frac);
             }
             const active = activeResearchNodeId === node.id;
-            // floor to never show progress the drain hasn't reached; epsilon absorbs analytic
-            // float error so a logical 40 at 39.9999999999 doesn't read 39.
-            const roundedConsumed = Math.floor(consumed + 1e-9);
+            const roundedConsumed = displayFloor(consumed);
             let status = "";
             if (active) status = "researching";
             else if (consumed >= node.cost) status = "researched";
@@ -502,9 +498,9 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
       const tick = (): void => {
         // Bank a node that finished this frame (online or across an offline jump) before
         // rendering, so its bar reads "researched" the same frame the drain crossed cost;
-        // session.command persists and notifies subscribers when that happens.
-        session.command(collect);
-        const t = session.advanceToNow();
+        // session.command persists and notifies subscribers when that happens; the
+        // returned t is the single authoritative sim time for this frame's reads.
+        const t = session.command(collect);
         // Refresh the active-research scan for this frame's row/button reads (no per-node rescan).
         activeResearchId = null;
         activeResearchNodeId = null;

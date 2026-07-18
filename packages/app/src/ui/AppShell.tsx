@@ -1,8 +1,9 @@
 import { getWarehouse, warehouseAmountAt, type IslandId } from "@fathomrest/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { resetSave } from "../persistence.ts";
 import { PixiReadout } from "../PixiReadout.tsx";
+import { displayFloor } from "../sim/display.ts";
 import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
 import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
@@ -108,9 +109,11 @@ function KnowledgePill(): React.JSX.Element | null {
   if (session === null) return null;
   const poolId = session.world.knowledgePoolId;
   if (poolId === undefined) return null;
-  const t = session.advanceToNow();
-  // Floor with epsilon, like the Pixi readout: never show knowledge the player can't spend.
-  const amount = Math.floor(warehouseAmountAt(session.world.state, poolId, t) + 1e-9);
+  // Pure read: renders must not advance the sim (StrictMode/concurrent renders can
+  // re-run or discard). warehouseAmountAt is closed-form and clamped, so reading at
+  // now() without an advance is exact; the Pixi ticker owns advancing.
+  const t = session.now();
+  const amount = displayFloor(warehouseAmountAt(session.world.state, poolId, t));
   const capacity = getWarehouse(session.world.state, poolId).capacity;
   return (
     <span style={knowledgePillStyle}>
@@ -131,14 +134,30 @@ function OverlayScaffold({
 }): React.JSX.Element {
   const spec = OVERLAYS[kind];
   const dark = spec.tone === "violet";
+  const ref = useRef<HTMLDialogElement>(null);
+  // showModal(): top layer, background inert (no Tab-behind), focus moved in and
+  // restored to the opener on close, Esc handled natively (cancel → close → onClose).
+  // Open-guarded because StrictMode re-runs the effect and showModal throws on an
+  // already-open dialog; the ✕ button goes through close() so the close event stays
+  // the single unmount path.
+  useEffect(() => {
+    const dialog = ref.current;
+    if (dialog !== null && !dialog.open) dialog.showModal();
+  }, []);
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
+    <dialog
+      ref={ref}
+      onClose={onClose}
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 10,
+        width: "100%",
+        height: "100%",
+        maxWidth: "none",
+        maxHeight: "none",
+        margin: 0,
+        padding: 0,
+        border: "none",
         display: "flex",
         flexDirection: "column",
         background: dark
@@ -170,12 +189,12 @@ function OverlayScaffold({
         </h2>
         <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2 }}>{spec.scope}</span>
         <span style={{ flex: 1 }} />
-        <button type="button" title="Close" onClick={onClose}>
+        <button type="button" title="Close" onClick={() => ref.current?.close()}>
           ✕
         </button>
       </header>
       <p style={{ margin: 24, opacity: 0.7 }}>Scaffold — content lands in a later phase.</p>
-    </div>
+    </dialog>
   );
 }
 
@@ -185,15 +204,6 @@ export function AppShell(): React.JSX.Element {
   // is nothing to select with, so it derives to the world's first island.
   const selectedIsland = session === null ? undefined : worldIslands(session.world)[0];
   const [overlay, setOverlay] = useState<OverlayKind | null>(null);
-
-  useEffect(() => {
-    if (overlay === null) return;
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setOverlay(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [overlay]);
 
   return (
     <div

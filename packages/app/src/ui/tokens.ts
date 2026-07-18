@@ -1,8 +1,8 @@
 // Design tokens from docs/design_handoff_fathomrest_ui/README.md (§Design Tokens).
-// Single hex source: React styles consume the strings, Pixi consumes them through
-// pixiColor(). Scope rules (handoff "hard rules"): island-scoped surfaces use the
-// parchment ramp; global scope (knowledge, research) is violet-only; rust means
-// blocked and nothing else; symptoms are amber.
+// Single hex source: React styles and Pixi fills both consume the strings — Pixi v8
+// accepts CSS "#rrggbb" directly. Scope rules (handoff "hard rules"): island-scoped
+// surfaces use the parchment ramp; global scope (knowledge, research) is violet-only;
+// rust means blocked and nothing else; symptoms are amber.
 
 /** Parchment ramp — island-scoped surfaces (dock, cards, skill tree, sea chart). */
 export const parchment = {
@@ -117,8 +117,3 @@ export const barHeights = {
 export const headingFont = '"Caveat Brush", "Comic Sans MS", cursive';
 /** Body/data face — data text pairs with font-variant-numeric:tabular-nums. */
 export const bodyFont = '"Playpen Sans", "Comic Sans MS", sans-serif';
-
-/** "#rrggbb" → 0xrrggbb for Pixi fills/strokes. */
-export function pixiColor(hex: string): number {
-  return Number.parseInt(hex.slice(1), 16);
-}

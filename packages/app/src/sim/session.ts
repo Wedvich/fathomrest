@@ -39,10 +39,11 @@ export interface SimSession {
   /** Persist at current sim time. No-op when persistence is disabled (failed load). */
   requestSave(): void;
   /**
-   * Run a command at now(). When it acted (returned true), persist and notify
-   * subscribers; a rejected command leaves state untouched, so neither happens.
+   * Run a command at now() and return that t. When the command acted (returned
+   * true), persist at that same t and notify subscribers; a rejected command
+   * leaves state untouched, so neither happens.
    */
-  command(run: (t: number) => boolean): boolean;
+  command(run: (t: number) => boolean): number;
   /** Change feed for React reads: fires after every acted command. Returns unsubscribe. */
   subscribe(listener: () => void): () => void;
   /** Remove lifecycle listeners and the autosave interval. Does not save. */
@@ -146,13 +147,18 @@ export async function createSimSession(): Promise<SimSession> {
       return t;
     };
 
-    const requestSave = (): void => {
+    // Persist the world as-is; callers must already have advanced state to the time
+    // being persisted, so save-on-command lands at exactly the command's t.
+    const persist = (): void => {
       if (persistenceDisabled) return;
-      advance(loaded.state, now());
       loaded.state.wallTime = Date.now();
       void writeSavedWorld(snapshotWorld(loaded)).catch((error: unknown) => {
         console.error("Failed to save world.", error);
       });
+    };
+    const requestSave = (): void => {
+      advanceToNow();
+      persist();
     };
     saveNow = requestSave;
 
@@ -163,13 +169,13 @@ export async function createSimSession(): Promise<SimSession> {
       now,
       advanceToNow,
       requestSave,
-      command(run: (t: number) => boolean): boolean {
-        const acted = run(advanceToNow());
-        if (acted) {
-          requestSave();
+      command(run: (t: number) => boolean): number {
+        const t = advanceToNow();
+        if (run(t)) {
+          persist();
           for (const listener of listeners) listener();
         }
-        return acted;
+        return t;
       },
       subscribe(listener: () => void): () => void {
         listeners.add(listener);
