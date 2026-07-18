@@ -6,6 +6,7 @@ import { getWarehouse } from "./components/warehouse.ts";
 import { peekEvent } from "./events.ts";
 import { idFromNumber } from "./ids.ts";
 import { islandId } from "./island.ts";
+import { researchNodeId } from "./researchNode.ts";
 import { resourceType } from "./resource.ts";
 import {
   deserializeState,
@@ -24,11 +25,13 @@ import {
   advance,
   converterDraw,
   converterFeed,
-  routeFlow,
-  setWarehousePullRate,
   grantIslandXp,
   islandXpAt,
   registerIsland,
+  researchConsumedAt,
+  routeFlow,
+  setWarehousePullRate,
+  startResearch,
   warehouseAmountAt,
 } from "./sim.ts";
 import { createSimState, type SimState } from "./state.ts";
@@ -418,6 +421,102 @@ describe("serializer", () => {
     advance(restored, 1_000);
     advance(state, 1_000);
     expect(serializeState(restored)).toStrictEqual(serializeState(state));
+  });
+
+  // A knowledge pool fed by a producer with a node mid-drain — the active-research fixture.
+  function researchState(): { state: SimState; poolId: ReturnType<typeof addWarehouse> } {
+    const state = createSimState(7, 2_000);
+    const poolId = addWarehouse(state, 0, R, I, 100);
+    const depositId = addDeposit(state, 0, R, [], 1);
+    addExtractor(state, 0, 2, depositId, poolId); // inflow 2 > drain 1: the drain runs steadily
+    startResearch(state, 0, researchNodeId("node-a"), poolId, 1, 100, 0);
+    advance(state, 20); // mid-drain, completion event still pending
+    return { state, poolId };
+  }
+
+  it("round-trips an active research drain and re-derives identical progress", () => {
+    const { state } = researchState();
+    const restored = deserializeState(serializeState(state));
+    advance(state, 50);
+    advance(restored, 50);
+    const [entry] = serializeState(state).research;
+    expect(entry).toBeDefined();
+    if (entry !== undefined) {
+      expect(researchConsumedAt(restored, entry[0], 50)).toBe(
+        researchConsumedAt(state, entry[0], 50),
+      );
+    }
+    expect(serializeState(restored)).toStrictEqual(serializeState(state));
+  });
+
+  it("migrates a v4 save by backfilling an empty research table, preserving idle progress", () => {
+    const { state } = midFlightState();
+    const doc = serializeState(state);
+    const { research: _omit, ...rest } = doc;
+    const v4 = { ...rest, version: 4 } as SaveDocument;
+    const restored = deserializeState(v4);
+    advance(restored, 1_000);
+    advance(state, 1_000);
+    expect(serializeState(restored)).toStrictEqual(serializeState(state));
+  });
+
+  it("clamps consumed above cost to cost at load, so a lowered-cost rebalance can't strand it", () => {
+    const doc = serializeState(researchState().state);
+    const research = doc.research.map(([id, r]): (typeof doc.research)[number] => [
+      id,
+      { ...r, anchorConsumed: r.cost + 500 },
+    ]);
+    const restored = deserializeState({ ...doc, research });
+    const [entry] = doc.research;
+    if (entry === undefined) {
+      throw new Error("researchState should produce one active node");
+    }
+    expect(researchConsumedAt(restored, entry[0], 20)).toBe(entry[1].cost); // clamped to cost
+  });
+
+  it("stops the pool drain when a node clamps to complete on load (no orphaned pull)", () => {
+    // A save taken mid-drain whose cost is later lowered below the saved consumed loads as
+    // complete. The completion handler never ran, so without reconciliation the pool would keep
+    // draining knowledge into the finished node. Reconcile-on-load must zero the pull.
+    const { state, poolId } = researchState();
+    const before = getWarehouse(state, poolId).pullRate;
+    expect(before).toBeGreaterThan(0); // the active drain is pulling the pool
+    const doc = serializeState(state);
+    const research = doc.research.map(([id, r]): (typeof doc.research)[number] => [
+      id,
+      { ...r, anchorConsumed: r.cost + 500 },
+    ]);
+    const restored = deserializeState({ ...doc, research });
+    expect(getWarehouse(restored, poolId).pullRate).toBe(0); // drain stopped, pool no longer bleeds
+    expect(warehouseAmountAt(restored, poolId, restored.epoch + 10_000)).toBeGreaterThan(0);
+  });
+
+  it("rejects more than one active research (single slot invariant)", () => {
+    const doc = serializeState(researchState().state);
+    const [entry] = doc.research;
+    if (entry === undefined) {
+      throw new Error("researchState should produce one active node");
+    }
+    const twinned = [entry, [idFromNumber(900), { ...entry[1] }]] as typeof doc.research;
+    expect(() => deserializeState({ ...doc, research: twinned })).toThrow(/at most one/);
+  });
+
+  it("rejects research documents violating the import invariants", () => {
+    const doc = serializeState(researchState().state);
+    const patched = (patch: object): SaveDocument => ({
+      ...doc,
+      research: doc.research.map(([id, r]): (typeof doc.research)[number] => [
+        id,
+        { ...r, ...patch },
+      ]),
+    });
+    expect(() => deserializeState(patched({ nodeId: researchNodeId("") }))).toThrow(/nodeId/);
+    expect(() => deserializeState(patched({ drainRate: 0 }))).toThrow(/drainRate/);
+    expect(() => deserializeState(patched({ cost: 0 }))).toThrow(/cost/);
+    expect(() => deserializeState(patched({ warehouseId: idFromNumber(999) }))).toThrow(
+      /warehouse/,
+    );
+    expect(() => deserializeState(patched({ anchorConsumed: -1 }))).toThrow(/anchorConsumed/);
   });
 
   it("rejects a structurally truncated document", () => {

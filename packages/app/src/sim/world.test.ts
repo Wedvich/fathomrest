@@ -21,15 +21,22 @@ import {
   buildExtractor,
   buyNode,
   canBuyNode,
+  cancelResearch,
+  collectCompletedResearch,
   createDemoWorld,
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
   islandXpView,
+  isResearchActive,
+  isResearched,
   nextStorageTier,
+  researchConsumed,
+  type ResearchNode,
   restoreWorld,
   type SavedWorld,
   snapshotWorld,
+  startResearch,
   upgradeStorage,
   WORLD_CONTENT_VERSION,
   worldIslands,
@@ -643,5 +650,97 @@ describe("island skill tree", () => {
     // But XP accrues going forward — the extractors are still running.
     advance(restored.state, epoch + 10);
     expect(islandXpView(restored, HOME, restored.state.epoch).xp).toBeGreaterThan(0);
+  });
+});
+
+// Research as a scenario (DESIGN.md Progression/Research): the knowledge pool the observatory
+// fills is drained by an active research node — a continuous drain with preserved per-node
+// progress and a free swap. Drives the real core commands through the world layer, no mocks.
+describe("research drain", () => {
+  const KNOWLEDGE = resourceType("knowledge");
+
+  // A demo world with wood + stone + observatory income running, so knowledge accrues into the
+  // global pool (2/s) and the research nodes have something to drain. Observatory affordable by
+  // t=15 (40 wood + 40 stone from a 2/s base), matching the knowledge-tier scenario.
+  function fundedWorld(): DemoWorld {
+    const world = createDemoWorld(1, 0);
+    world.state.wallTime = 0;
+    const { woodA, stoneA } = namedDeposits(world);
+    const observatory = world.deposits.find((d) => d.resource === KNOWLEDGE);
+    if (!observatory) throw new Error("no observatory deposit");
+    buildExtractor(world, woodA.id, 0);
+    buildExtractor(world, stoneA.id, 0);
+    if (!buildExtractor(world, observatory.id, 15))
+      throw new Error("observatory should be funded by t=15");
+    return world;
+  }
+
+  function node(world: DemoWorld, id: string): ResearchNode {
+    const found = world.researchNodes.find((n) => n.id === id);
+    if (!found) throw new Error(`no research node ${id}`);
+    return found;
+  }
+
+  it("a fresh world exposes the research tree with nothing active or researched", () => {
+    const world = createDemoWorld(1, 0);
+    expect(world.researchNodes.length).toBeGreaterThan(0);
+    expect(world.knowledgePoolId).toBeDefined();
+    for (const n of world.researchNodes) {
+      expect(isResearched(world, n)).toBe(false);
+      expect(isResearchActive(world, n)).toBe(false);
+    }
+  });
+
+  it("drains knowledge into the active node, then banks it as researched on completion", () => {
+    const world = fundedWorld();
+    const survey = node(world, "survey-cache"); // cost 40 at drain 1/s
+    expect(startResearch(world, survey, 20)).toBe(true);
+    expect(isResearchActive(world, survey)).toBe(true);
+    // Inflow 2 > drain 1, so the pool never starves: consumed climbs a steady 1/s from t=20.
+    advance(world.state, 40);
+    expect(researchConsumed(world, survey, 40)).toBeCloseTo(20, 9);
+    // Past completion (start + cost = t=60): collecting the finished node frees the slot and
+    // records it researched.
+    advance(world.state, 60);
+    expect(collectCompletedResearch(world, 60)).toBe(true);
+    expect(isResearched(world, survey)).toBe(true);
+    expect(isResearchActive(world, survey)).toBe(false);
+    // A researched node can't be restarted, and collecting again is a no-op.
+    expect(startResearch(world, survey, 61)).toBe(false);
+    expect(collectCompletedResearch(world, 61)).toBe(false);
+  });
+
+  it("swaps the active node freely and resumes each where it was left", () => {
+    const world = fundedWorld();
+    const survey = node(world, "survey-cache");
+    const holds = node(world, "reinforced-holds");
+    startResearch(world, survey, 20);
+    advance(world.state, 30); // survey consumed ~10
+    // Swap to holds: survey's progress is banked, holds starts fresh.
+    expect(startResearch(world, holds, 30)).toBe(true);
+    expect(isResearchActive(world, holds)).toBe(true);
+    expect(researchConsumed(world, survey, 30)).toBeCloseTo(10, 9); // preserved off-slot
+    advance(world.state, 40); // holds consumed ~10
+    // Swap back to survey: it resumes from ~10, not zero.
+    expect(startResearch(world, survey, 40)).toBe(true);
+    expect(researchConsumed(world, holds, 40)).toBeCloseTo(10, 9); // holds now preserved off-slot
+    advance(world.state, 45);
+    expect(researchConsumed(world, survey, 45)).toBeCloseTo(15, 9); // 10 banked + 5s at 1/s
+  });
+
+  it("preserves an in-flight drain and its progress across a save round-trip", () => {
+    const world = fundedWorld();
+    const survey = node(world, "survey-cache");
+    startResearch(world, survey, 20);
+    advance(world.state, 40);
+    const before = researchConsumed(world, survey, 40);
+    const restored = restoreWorld(structuredClone(snapshotWorld(world)), 0);
+    expect(isResearchActive(restored, survey)).toBe(true);
+    expect(researchConsumed(restored, survey, 40)).toBeCloseTo(before, 9);
+    // A paused node's banked progress round-trips too: cancel, save, restore, resume.
+    expect(cancelResearch(restored, 40)).toBe(true);
+    const paused = restoreWorld(structuredClone(snapshotWorld(restored)), 0);
+    expect(isResearchActive(paused, survey)).toBe(false);
+    expect(researchConsumed(paused, survey, 40)).toBeCloseTo(before, 9);
   });
 });

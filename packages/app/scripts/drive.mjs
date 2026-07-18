@@ -1,6 +1,8 @@
-// Post-commit live drive: headless Chromium against the dev server, walking the storage-upgrade
-// flow end-to-end (fresh world -> build base economy -> buy the knowledge observatory -> buy
-// storage rung 1 -> buy a skill-tree trunk node -> IndexedDB reopen).
+// Post-commit live drive: headless Chromium against the dev server, walking the storage-upgrade,
+// island-skill, and research flows end-to-end (fresh world -> build base economy -> buy the
+// knowledge observatory -> buy storage rung 1 -> buy a skill-tree trunk node -> drain knowledge
+// into a research node to completion -> IndexedDB reopen with the trunk node and researched node
+// persisted).
 // A verification harness, not a test suite — Vitest owns scenario coverage. Pool readout bars are
 // Pixi CANVAS text and cannot be asserted from the DOM: assertions target the <button> elements;
 // screenshots capture the bars for visual inspection.
@@ -148,6 +150,22 @@ async function main() {
   await skillNode.click();
   await page.getByRole("button", { name: /Efficient Tools — owned/ }).waitFor({ timeout: 5_000 });
   await page.screenshot({ path: join(OUT_DIR, "4-skill-node-owned.png") });
+
+  // --- Research: knowledge is now accruing into the global pool. Start the first node — research
+  // is a drain with no upfront cost, so its button is enabled the moment the pool exists — then let
+  // it drain to completion. Fed 2/s vs a 1/s drain, so the 40-knowledge node finishes ~40s after
+  // start. ---
+  const research = page.getByRole("button", { name: /Research Survey Cache/ });
+  await research.waitFor({ timeout: 15_000 });
+  assert(!(await research.isDisabled()), "research button enabled once the knowledge pool exists");
+  await research.click();
+  await page.getByRole("button", { name: /Cancel — Survey Cache/ }).waitFor({ timeout: 5_000 }); // the drain is now active on this node
+  await page.screenshot({ path: join(OUT_DIR, "5-researching.png") });
+  // Completion flips the button to the researched (disabled) state and frees the slot.
+  await page
+    .getByRole("button", { name: /Survey Cache — researched/ })
+    .waitFor({ timeout: 60_000 });
+  await page.screenshot({ path: join(OUT_DIR, "6-researched.png") });
   await ctx.close();
 
   // --- Session 2: reopen the same profile — IndexedDB restore + offline catch-up ---
@@ -158,7 +176,11 @@ async function main() {
   assert(/→ 500/.test(reopenLabel ?? ""), `restored rung after reopen, got "${reopenLabel}"`);
   // The bought skill node persists across the reopen (its effect lives in core state).
   await page2.getByRole("button", { name: /Efficient Tools — owned/ }).waitFor({ timeout: 5_000 });
-  await page2.screenshot({ path: join(OUT_DIR, "5-reopen.png") });
+  // The researched node persisted through the save round-trip (researchProgress in the envelope).
+  const researched2 = page2.getByRole("button", { name: /Survey Cache — researched/ });
+  await researched2.waitFor({ timeout: 10_000 });
+  assert(await researched2.isDisabled(), "researched node stays disabled after reopen");
+  await page2.screenshot({ path: join(OUT_DIR, "7-reopen.png") });
   await ctx2.close();
 
   assert(pageErrors.length === 0, `no console/page errors, got:\n${pageErrors.join("\n")}`);

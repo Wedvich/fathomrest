@@ -6,10 +6,12 @@ import {
   canAffordBuild,
   buildConverter as buildConverterCmd,
   buildExtractor as buildExtractorCmd,
+  clearResearch as clearResearchCmd,
   createSimState,
   deserializeState,
   forEachConverter,
   forEachExtractor,
+  forEachResearch,
   forEachWarehouse,
   getDeposit,
   getWarehouse,
@@ -20,11 +22,15 @@ import {
   InsufficientStockError,
   offlineElapsedSeconds,
   islandId,
+  researchConsumedAt,
+  researchNodeId,
   resourceType,
   serializeState,
+  startResearch as startResearchCmd,
   upgradeIslandCapacity as upgradeIslandCapacityCmd,
   type Id,
   type IslandId,
+  type ResearchNodeId,
   type ResourceType,
   type SaveDocument,
   type SimState,
@@ -38,6 +44,19 @@ export interface DemoWorld {
   warehouses: readonly { id: Id; label: string }[];
   deposits: readonly Deposit[];
   converterSites: readonly ConverterSite[];
+  // The research tree (static app content; DESIGN.md Progression/Research). Not persisted —
+  // reattached from RESEARCH_NODES on create/restore.
+  researchNodes: readonly ResearchNode[];
+  // The global knowledge pool the active node drains, or undefined when the knowledge tier
+  // isn't present yet (a pre-knowledge save whose v2->v3 upgrade step hasn't landed). Research
+  // is offered only when defined.
+  knowledgePoolId: Id | undefined;
+  // Preserved absolute knowledge consumed per INACTIVE node (nodeId -> consumed). The ACTIVE
+  // node's live progress lives in core (the Research drain), never here — start/settle move a
+  // node between the two, so there is one source of truth at any instant. A node is
+  // "researched" once its stored value reaches its cost. Mutated in place by the research
+  // commands; persisted as entries.
+  researchProgress: Map<ResearchNodeId, number>;
   // Content revision this world is at — WORLD_CONTENT_VERSION after createDemoWorld or a
   // fully-upgraded restore; lower when an upgrade step failed (the version is stamped per
   // successful step, so the next restore retries the failed one); higher when a newer app
@@ -108,6 +127,9 @@ export interface SavedWorld {
   // Absent on a pre-iron-tier save (contentVersion 1); restoreWorld defaults it to [] before
   // the upgrade step injects the iron refinery.
   converterSites?: readonly ConverterSite[];
+  // Preserved consumed per inactive research node (the active node's progress rides in the core
+  // doc's research table). Absent on a pre-research save; restoreWorld defaults it to empty.
+  researchProgress?: readonly (readonly [ResearchNodeId, number])[];
   // App content revision this envelope was written at. Absent on a pre-versioning save
   // (treated as 1). Bumped whenever a WORLD_UPGRADES step is added, so restoreWorld can
   // raise older saves to current.
@@ -149,6 +171,29 @@ const KNOWLEDGE_CAP = 100; // placeholder; raised by research later, never by th
 // The tier-0 observatory is cost-gated only (wood/stone), above STARTING_STOCK like the iron
 // builds so the base economy must already be running (DESIGN.md: the bootstrap into research).
 const OBSERVATORY_COST = 40;
+
+// Research drains knowledge continuously at one global base rate (DESIGN.md Progression/Research:
+// duration = cost / rate when the pool keeps up). Placeholder tuning; raised later by research
+// itself (research/meta unlocks). At 1/s a 60-knowledge node takes 60s fully fed, and stalls to
+// the observatory's income when the pool runs dry.
+const RESEARCH_DRAIN_RATE = 1;
+
+// One node of the (flat, for now) research tree: an absolute knowledge cost to complete. Part 2
+// is the drain MECHANIC only — completing a node marks it researched with no gameplay effect yet;
+// the unlock effects (storage gate, queue depth, economy modifiers) land in part 3 (DESIGN.md
+// unlock categories). Costs span the knowledge cap so the slice exercises a quick node, a
+// mid node, and one that needs the pool near full.
+export interface ResearchNode {
+  readonly id: ResearchNodeId;
+  readonly label: string;
+  readonly cost: number;
+}
+
+const RESEARCH_NODES: readonly ResearchNode[] = [
+  { id: researchNodeId("survey-cache"), label: "Survey Cache", cost: 40 },
+  { id: researchNodeId("reinforced-holds"), label: "Reinforced Holds", cost: 60 },
+  { id: researchNodeId("tidal-almanac"), label: "Tidal Almanac", cost: 100 },
+];
 
 // True for the distinguished global scope: its pools sit outside every per-island system —
 // the storage ladder today, island XP later. Island-enumerating features must filter through
@@ -287,6 +332,17 @@ const SKILL_NODES: ReadonlyMap<string, SkillNode> = new Map(
 const SKILL_NODE_COSTS: ReadonlyMap<string, ReadonlyMap<ResourceType, number>> = new Map(
   HOME_SKILL_TREE.map((node) => [node.id, new Map(node.cost)]),
 );
+
+// The global knowledge pool an active research node drains, derived from core state (the KNOWLEDGE
+// warehouse on the GLOBAL scope). undefined when the knowledge tier isn't present yet (a save whose
+// v2->v3 upgrade step hasn't landed), which hides the research UI rather than crashing it.
+function findKnowledgePool(state: SimState): Id | undefined {
+  let found: Id | undefined;
+  forEachWarehouse(state, (id, warehouse) => {
+    if (warehouse.resource === KNOWLEDGE && isGlobalScope(warehouse.islandId)) found = id;
+  });
+  return found;
+}
 
 // One rung of the storage-upgrade ladder: raise a pool's capacity to `capacity` for `cost`.
 export interface StorageTier {
@@ -480,6 +536,9 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
     deposits: [woodA, woodB, stoneA, stoneB, ...iron.deposits, ...knowledge.deposits],
     converterSites: iron.converterSites,
     purchasedNodes: [],
+    researchNodes: RESEARCH_NODES,
+    knowledgePoolId: findKnowledgePool(state),
+    researchProgress: new Map(),
     contentVersion: WORLD_CONTENT_VERSION,
   };
 }
@@ -533,6 +592,8 @@ export function snapshotWorld(world: DemoWorld): SavedWorld {
     deposits: world.deposits,
     converterSites: world.converterSites,
     purchasedNodes: world.purchasedNodes,
+    // Inactive-node progress; the active node rides in doc's research table.
+    researchProgress: [...world.researchProgress],
     contentVersion: world.contentVersion,
   };
 }
@@ -778,6 +839,9 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
     deposits,
     converterSites: saved.converterSites ?? [], // absent on a pre-iron-tier (v1) save
     purchasedNodes,
+    researchNodes: RESEARCH_NODES,
+    knowledgePoolId: undefined, // re-derived after upgrades (the v2->v3 step may add the pool)
+    researchProgress: reconstructResearchProgress(state, saved.researchProgress),
     contentVersion: savedVersion,
   };
   // Content upgrades run after offline catch-up (design decision 3): new structures are
@@ -797,5 +861,142 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
       break;
     }
   }
-  return world;
+  // Derive the knowledge pool now that any v2->v3 upgrade has landed, and drop an active drain
+  // whose node this app no longer defines (removed content) so its slot frees instead of
+  // wedging the UI on an unknown node.
+  const finalized: DemoWorld = { ...world, knowledgePoolId: findKnowledgePool(world.state) };
+  dropUnknownActiveResearch(finalized);
+  return finalized;
+}
+
+// Rebuild the inactive-node progress map from a save, dropping what can't be trusted rather than
+// quarantining the whole save (progress is additive app state — losing one node's progress beats
+// resetting a working world). Skips entries for nodes this app no longer defines and the currently
+// ACTIVE node (its live progress rides in core, the single source of truth), and clamps each value
+// into [0, cost] so a lowered-cost rebalance reads as researched instead of stranding progress.
+function reconstructResearchProgress(
+  state: SimState,
+  saved: readonly (readonly [ResearchNodeId, number])[] | undefined,
+): Map<ResearchNodeId, number> {
+  const progress = new Map<ResearchNodeId, number>();
+  if (saved === undefined) return progress;
+  const activeNodeId = activeResearchEntry(state)?.nodeId;
+  for (const entry of saved) {
+    if (!Array.isArray(entry) || entry.length !== 2) continue;
+    const [nodeId, consumed] = entry;
+    const node = RESEARCH_NODES.find((n) => n.id === nodeId);
+    if (node === undefined || nodeId === activeNodeId) continue;
+    if (typeof consumed !== "number" || !Number.isFinite(consumed)) continue;
+    progress.set(node.id, Math.min(node.cost, Math.max(0, consumed)));
+  }
+  return progress;
+}
+
+// Clear an active core drain whose node this app no longer defines (content removed since the
+// save). The consumed knowledge is forfeit — acceptable for deleted content — and the slot frees.
+function dropUnknownActiveResearch(world: DemoWorld): void {
+  forEachResearch(world.state, (id, research) => {
+    if (!RESEARCH_NODES.some((n) => n.id === research.nodeId)) {
+      clearResearchCmd(world.state, world.state.epoch, id);
+    }
+  });
+}
+
+// The single active drain, as {core id, node tag}, or undefined — the one place the core research
+// table (≤1 entry, single slot) is read into app terms. Everything else routes through this so
+// "which node is active" has one definition.
+function activeResearchEntry(state: SimState): { id: Id; nodeId: ResearchNodeId } | undefined {
+  let entry: { id: Id; nodeId: ResearchNodeId } | undefined;
+  forEachResearch(state, (id, research) => {
+    entry = { id, nodeId: research.nodeId };
+  });
+  return entry;
+}
+
+// Whether this node is the one currently draining the pool.
+export function isResearchActive(world: DemoWorld, node: ResearchNode): boolean {
+  return activeResearchEntry(world.state)?.nodeId === node.id;
+}
+
+// Whether this node is finished — its preserved consumed has reached cost. The active node reads
+// as researched only once collected (collectCompletedResearch moves it into the progress map at
+// cost), so a node mid-drain is never "researched" here.
+export function isResearched(world: DemoWorld, node: ResearchNode): boolean {
+  return (world.researchProgress.get(node.id) ?? 0) >= node.cost;
+}
+
+// Absolute knowledge a node has consumed at t GIVEN the already-resolved active drain (its core id
+// and node tag, or null when nothing is active): the live core value while this node is the active
+// drain, otherwise its preserved progress (0 if untouched). The single definition of that rule —
+// both the public researchConsumed and PixiReadout's per-frame reader route through it, so the two
+// can't drift. Takes the active handle as primitives, so the frame loop passes its hoisted
+// once-per-frame scan without allocating (perf doc).
+export function researchConsumedGiven(
+  world: DemoWorld,
+  node: ResearchNode,
+  activeId: Id | null,
+  activeNodeId: ResearchNodeId | null,
+  t: number,
+): number {
+  if (activeNodeId === node.id && activeId !== null) {
+    return researchConsumedAt(world.state, activeId, t);
+  }
+  return world.researchProgress.get(node.id) ?? 0;
+}
+
+// Absolute knowledge this node has consumed at t. Resolves the active drain itself (one map read);
+// callers already holding a per-frame scan use researchConsumedGiven directly.
+export function researchConsumed(world: DemoWorld, node: ResearchNode, t: number): number {
+  const active = activeResearchEntry(world.state);
+  return researchConsumedGiven(world, node, active?.id ?? null, active?.nodeId ?? null, t);
+}
+
+// Start (or resume) draining knowledge into `node` at sim time t. Single active slot: if another
+// node is draining, this SWAPS — the outgoing node's live consumed is banked into the progress map
+// (free cancel, no decay) before the new node starts from its own preserved progress. Returns false
+// when there is no knowledge pool yet, the node is already researched, or it is already the active
+// drain (all no-ops). The core command begins the drain exactly at t.
+export function startResearch(world: DemoWorld, node: ResearchNode, t: number): boolean {
+  if (world.knowledgePoolId === undefined) return false;
+  if (isResearched(world, node)) return false;
+  const active = activeResearchEntry(world.state);
+  if (active !== undefined) {
+    if (active.nodeId === node.id) return false;
+    world.researchProgress.set(active.nodeId, clearResearchCmd(world.state, t, active.id));
+  }
+  const startingConsumed = world.researchProgress.get(node.id) ?? 0;
+  startResearchCmd(
+    world.state,
+    t,
+    node.id,
+    world.knowledgePoolId,
+    RESEARCH_DRAIN_RATE,
+    node.cost,
+    startingConsumed,
+  );
+  world.researchProgress.delete(node.id); // its progress now lives in core (single source of truth)
+  return true;
+}
+
+// Cancel the active drain at t, banking its consumed into the progress map (resume later where it
+// left off). Returns false when nothing is active.
+export function cancelResearch(world: DemoWorld, t: number): boolean {
+  const active = activeResearchEntry(world.state);
+  if (active === undefined) return false;
+  world.researchProgress.set(active.nodeId, clearResearchCmd(world.state, t, active.id));
+  return true;
+}
+
+// Collect the active node if it has reached cost at t: free the slot and record it researched
+// (stored consumed == cost). Called every frame so a node that completes online — or across an
+// offline jump — is banked the moment the drain crosses its cost. Returns whether it collected
+// (the caller saves on true).
+export function collectCompletedResearch(world: DemoWorld, t: number): boolean {
+  const active = activeResearchEntry(world.state);
+  if (active === undefined) return false;
+  const node = world.researchNodes.find((n) => n.id === active.nodeId);
+  if (node === undefined) return false; // unknown node (restore drops these); nothing to collect
+  if (researchConsumedAt(world.state, active.id, t) < node.cost) return false;
+  world.researchProgress.set(active.nodeId, clearResearchCmd(world.state, t, active.id));
+  return true;
 }

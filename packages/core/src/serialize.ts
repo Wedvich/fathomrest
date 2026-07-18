@@ -2,6 +2,7 @@ import type { Converter } from "./components/converter.ts";
 import type { Deposit, DepositTier } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import type { IslandProgress } from "./components/island-progress.ts";
+import type { Research } from "./components/research.ts";
 import type { Route } from "./components/route.ts";
 import { WAREHOUSE_REGIMES, type Warehouse } from "./components/warehouse.ts";
 import {
@@ -16,14 +17,14 @@ import type { Id } from "./ids.ts";
 import { islandId, type IslandId } from "./island.ts";
 import type { PrngState } from "./prng.ts";
 import type { ResourceType } from "./resource.ts";
-import { isStaleEvent } from "./sim.ts";
+import { isStaleEvent, reconcileResearchOnLoad } from "./sim.ts";
 import type { SimState } from "./state.ts";
 
 // Canonical wire format (docs/browser-performance.md): Map tables as [id, component]
 // entry arrays, events as a sorted list. One codec for export, import, and future cloud
 // sync — the schema never forks.
 
-const SAVE_VERSION = 4;
+const SAVE_VERSION = 5;
 
 export type TableEntries<T> = [Id, T][];
 
@@ -42,6 +43,7 @@ export interface SaveDocument {
   // Per-island progression accumulators, keyed by island tag (island-progress.ts). Not a
   // TableEntries (those key by numeric Id); islands are opaque string tags.
   islandProgress: [IslandId, IslandProgress][];
+  research: TableEntries<Research>;
 }
 
 // Tables and events are copied in both directions so a save document never aliases
@@ -55,6 +57,17 @@ function copyDeposit(deposit: Deposit): Deposit {
   return {
     ...deposit,
     tiers: deposit.tiers.map((tier): DepositTier => ({ ...tier })),
+  };
+}
+
+// Clamp consumed into [0, cost] on the way in so a save written under a higher cost (before
+// a content rebalance lowered it) can't strand progress above the new cost — the node reads
+// as complete instead (DESIGN.md: absolute progress, clamped to cost at load). Serialize-side
+// this is a no-op on an already-valid value; only deserialize needs it.
+function copyResearch(research: Research): Research {
+  return {
+    ...research,
+    anchorConsumed: Math.min(research.cost, Math.max(0, research.anchorConsumed)),
   };
 }
 
@@ -100,6 +113,7 @@ export function serializeState(state: SimState): SaveDocument {
     islandProgress: [...state.islandProgress].map(
       ([island, progress]): [IslandId, IslandProgress] => [island, { ...progress }],
     ),
+    research: tableToEntries(state.research),
   };
 }
 
@@ -349,6 +363,26 @@ function validateDocument(doc: SaveDocument): void {
     checkNonNegative(progress.xpRate, `islandProgress[${island}].xpRate`);
     checkPositive(progress.extractionMultiplier, `islandProgress[${island}].extractionMultiplier`);
   }
+  // Single active slot (queue depth 0, DESIGN.md): at most one research entry, so a
+  // hand-edited save with two drains can't quietly double-consume the pool.
+  if (Array.isArray(doc.research) && doc.research.length > 1) {
+    throw invalid("at most one active research (single slot)");
+  }
+  const researchIds = checkTable(doc.research, "research", (research, at) => {
+    checkTag(research.nodeId, `${at}.nodeId`);
+    checkFinite(research.warehouseId, `${at}.warehouseId`);
+    if (!warehouseIds.has(research.warehouseId)) {
+      throw invalid(`${at}.warehouseId ${research.warehouseId} has no warehouse`);
+    }
+    checkPositive(research.drainRate, `${at}.drainRate`);
+    checkPositive(research.cost, `${at}.cost`);
+    // Upper bound is not rejected — copyResearch clamps consumed to cost at load so a
+    // lowered-cost rebalance reads as complete rather than failing the import.
+    checkNonNegative(research.anchorConsumed, `${at}.anchorConsumed`);
+    checkFinite(research.anchorTime, `${at}.anchorTime`);
+    checkFinite(research.consumeRate, `${at}.consumeRate`);
+    checkFinite(research.eventSeq, `${at}.eventSeq`);
+  });
   // The solver's convergence bound rests on an acyclic transfer graph; a hand-edited
   // save with a cycle would otherwise throw deep inside a later advance(). Reject it here.
   checkTransfersAcyclic(doc.routes, doc.converters);
@@ -367,11 +401,17 @@ function validateDocument(doc: SaveDocument): void {
     // Dangling entityIds would throw from a table getter inside a later advance() or
     // serializeState(); each kind targets its owning table (sim.ts dispatch).
     checkFinite(event.entityId, "event.entityId");
-    const ownerIds = event.kind === "deposit-tier-depleted" ? depositIds : warehouseIds;
+    let ownerIds = warehouseIds;
+    let ownerLabel = "warehouse";
+    if (event.kind === "deposit-tier-depleted") {
+      ownerIds = depositIds;
+      ownerLabel = "deposit";
+    } else if (event.kind === "research-complete") {
+      ownerIds = researchIds;
+      ownerLabel = "research";
+    }
     if (!ownerIds.has(event.entityId)) {
-      throw invalid(
-        `event.entityId ${event.entityId} has no ${event.kind === "deposit-tier-depleted" ? "deposit" : "warehouse"}`,
-      );
+      throw invalid(`event.entityId ${event.entityId} has no ${ownerLabel}`);
     }
   }
 }
@@ -405,6 +445,11 @@ function migrateDocument(doc: SaveDocument): SaveDocument {
   if (migrated.version === 3) {
     migrated = { ...migrated, version: 4, islandProgress: [] };
   }
+  // v4 predates the research drain: backfill an empty table (no active node), so an older
+  // save keeps its idle progress and simply starts with the slot free.
+  if (migrated.version === 4) {
+    migrated = { ...migrated, version: 5, research: [] };
+  }
   return migrated;
 }
 
@@ -421,7 +466,7 @@ export function deserializeState(doc: SaveDocument): SimState {
   for (const event of migrated.events) {
     pushEvent(events, { ...event });
   }
-  return {
+  const state: SimState = {
     epoch: migrated.epoch,
     wallTime: migrated.wallTime,
     nextId: migrated.nextId,
@@ -438,5 +483,11 @@ export function deserializeState(doc: SaveDocument): SimState {
         { ...progress },
       ]),
     ),
+    research: entriesToTable(migrated.research, copyResearch),
   };
+  // A research entry that clamped to complete on load (copyResearch, above) can leave its pool's
+  // pull live; bring the pool pull back in line with the entry's completion state before handing
+  // the state out. No-op on a consistent save.
+  reconcileResearchOnLoad(state);
+  return state;
 }

@@ -24,6 +24,13 @@ import {
   getIslandProgress,
   setIslandProgress,
 } from "./components/island-progress.ts";
+import {
+  createResearch,
+  forEachResearch,
+  getResearch,
+  setResearch,
+  type Research,
+} from "./components/research.ts";
 import { createRoute, forEachRoute, getRoute, setRoute } from "./components/route.ts";
 import {
   createWarehouse,
@@ -37,6 +44,7 @@ import { peekEvent, popEvent, pushEvent, type SimEvent } from "./events.ts";
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
 import type { IslandId } from "./island.ts";
+import type { ResearchNodeId } from "./researchNode.ts";
 import type { ResourceType } from "./resource.ts";
 import { allocId, type SimState } from "./state.ts";
 
@@ -69,12 +77,23 @@ export function advance(state: SimState, t: number): void {
   }
 }
 
+// The owning component's live seq, or null when the owner no longer exists. Research is the only
+// deletable entity (clearResearch): a completion event outliving its node — cancelled before it
+// fired — has no owner, so it reads as stale (dead) rather than throwing from a table getter.
+// Warehouses and deposits are never removed, so their getters stay strict.
+function liveEventSeq(state: SimState, event: SimEvent): number | null {
+  if (event.kind === "deposit-tier-depleted") {
+    return getDeposit(state, event.entityId).eventSeq;
+  }
+  if (event.kind === "research-complete") {
+    return state.research.get(event.entityId)?.eventSeq ?? null;
+  }
+  return getWarehouse(state, event.entityId).eventSeq;
+}
+
 export function isStaleEvent(state: SimState, event: SimEvent): boolean {
-  const liveSeq =
-    event.kind === "deposit-tier-depleted"
-      ? getDeposit(state, event.entityId).eventSeq
-      : getWarehouse(state, event.entityId).eventSeq;
-  return liveSeq !== event.seq;
+  const live = liveEventSeq(state, event);
+  return live === null || live !== event.seq;
 }
 
 function handleEvent(state: SimState, event: SimEvent): void {
@@ -86,6 +105,15 @@ function handleEvent(state: SimState, event: SimEvent): void {
     const nextTier = deposit.tiers[deposit.tierIndex];
     deposit.anchorRemaining = nextTier === undefined ? 0 : nextTier.amount;
     deposit.anchorTime = event.time;
+  } else if (event.kind === "research-complete") {
+    const research = getResearch(state, event.entityId);
+    research.anchorConsumed = research.cost; // pin exactly at cost, like warehouse-full pins to capacity
+    research.anchorTime = event.time;
+    research.consumeRate = 0;
+    // The node owns the pool's pull, so completion zeroes the drain here — otherwise a long
+    // offline jump would keep draining knowledge past the finished node before the app
+    // collects it. The completed entry lingers as a marker until the app clears it.
+    getWarehouse(state, research.warehouseId).pullRate = 0;
   } else {
     const warehouse = getWarehouse(state, event.entityId);
     warehouse.anchorTime = event.time;
@@ -138,6 +166,14 @@ function deriveAll(state: SimState): void {
     progress.xpAnchor += progress.xpRate * (t - progress.xpAnchorTime);
     progress.xpAnchorTime = t;
     progress.xpRate = islandThroughput(state, island);
+  });
+  // Research reads each pool's realized outflow (settled by scheduleWarehouse above), so it
+  // runs last too. The drain is carried in the pool's pullRate, so an empty pool already
+  // throttles it to income — nothing here re-derives the throttle, it only tracks consumed and
+  // schedules the completion crossing.
+  forEachResearch(state, (id, research) => {
+    reanchorResearch(research, t);
+    deriveResearchCompletion(state, id, research);
   });
 }
 
@@ -526,6 +562,31 @@ function deriveDepositDepletion(state: SimState, id: Id, deposit: Deposit): void
   }
 }
 
+// Recompute the research drain's realized rate and the next completion crossing. Callers
+// must have scheduled the warehouses first (so the pool's regime/throttle are settled) and
+// re-anchored the research at the current time. The pool carries the drain in its pullRate
+// and has no other consumer, so warehouseOutflowRate IS the realized draw — an empty pool
+// throttles it to income (stall), a fed pool runs it at drainRate.
+function deriveResearchCompletion(state: SimState, id: Id, research: Research): void {
+  research.eventSeq += 1; // invalidates any scheduled completion for this node
+  if (research.anchorConsumed >= research.cost) {
+    // Already complete: the completion handler zeroed the pull, so there is no drain and
+    // nothing to schedule. The entry lingers until the app collects it.
+    research.consumeRate = 0;
+    return;
+  }
+  const rate = warehouseOutflowRate(state, research.warehouseId);
+  research.consumeRate = rate;
+  if (rate > 0) {
+    pushEvent(state.events, {
+      time: research.anchorTime + (research.cost - research.anchorConsumed) / rate,
+      kind: "research-complete",
+      entityId: id,
+      seq: research.eventSeq,
+    });
+  }
+}
+
 function clampedAmount(warehouse: Warehouse, t: number): number {
   const raw = warehouse.anchorAmount + warehouse.netRate * (t - warehouse.anchorTime);
   return Math.min(warehouse.capacity, Math.max(0, raw));
@@ -544,6 +605,16 @@ function remainingInTier(deposit: Deposit, t: number): number {
 function reanchorDeposit(deposit: Deposit, t: number): void {
   deposit.anchorRemaining = remainingInTier(deposit, t);
   deposit.anchorTime = t;
+}
+
+function clampedConsumed(research: Research, t: number): number {
+  const raw = research.anchorConsumed + research.consumeRate * (t - research.anchorTime);
+  return Math.min(research.cost, Math.max(0, raw));
+}
+
+function reanchorResearch(research: Research, t: number): void {
+  research.anchorConsumed = clampedConsumed(research, t);
+  research.anchorTime = t;
 }
 
 function currentMultiplier(deposit: Deposit): number {
@@ -622,6 +693,14 @@ export function warehouseOutflowRate(state: SimState, id: Id): number {
 
 export function routeFlow(state: SimState, id: Id): number {
   return getRoute(state, id).flow;
+}
+
+// Absolute knowledge the node has consumed by t — the closed form clamped to [0, cost].
+// Complete iff this reaches cost (the completion event pins it there and zeroes the drain,
+// so it holds steady afterward). The app reads it for the progress bar and to detect
+// completion.
+export function researchConsumedAt(state: SimState, id: Id, t: number): number {
+  return clampedConsumed(getResearch(state, id), t);
 }
 
 // Realized converter consumption from its source, in source (A) units.
@@ -1089,4 +1168,85 @@ export function grantIslandXp(state: SimState, t: number, island: IslandId, amou
   progress.xpAnchor += progress.xpRate * (t - progress.xpAnchorTime) + amount;
   progress.xpAnchorTime = t;
   deriveAll(state);
+}
+
+// Research command: start draining `warehouseId` (a knowledge pool) at `drainRate` toward
+// `cost`, resuming from `startingConsumed` — the node's preserved progress (0 for a fresh
+// node; free swap means the app hands back what a paused node had consumed). The node takes
+// over the pool's pull, so this is single-slot: rejects a start while another node is active
+// (queue depth 0, DESIGN.md). Same validate -> advance -> mutate -> derive shape as the
+// build commands; the drain begins exactly at t (pull set after advance). startingConsumed
+// must be below cost — a node already at cost is complete, not startable.
+export function startResearch(
+  state: SimState,
+  t: number,
+  nodeId: ResearchNodeId,
+  warehouseId: Id,
+  drainRate: number,
+  cost: number,
+  startingConsumed: number,
+): Id {
+  if (nodeId.length === 0) {
+    throw new Error("research nodeId must be a non-empty tag");
+  }
+  if (!Number.isFinite(drainRate) || !(drainRate > 0)) {
+    throw new Error(`research drainRate must be finite and > 0, got ${drainRate}`);
+  }
+  if (!Number.isFinite(cost) || !(cost > 0)) {
+    throw new Error(`research cost must be finite and > 0, got ${cost}`);
+  }
+  if (!Number.isFinite(startingConsumed) || startingConsumed < 0 || startingConsumed >= cost) {
+    throw new Error(
+      `research startingConsumed must be finite in [0, cost), got ${startingConsumed}`,
+    );
+  }
+  const warehouse = getWarehouse(state, warehouseId); // validates the pool exists
+  if (state.research.size > 0) {
+    throw new Error("a research node is already active (single active slot, queue depth 0)");
+  }
+  advance(state, t);
+  warehouse.pullRate = drainRate; // the node drains the pool via its pull; set after advance so the drain starts at t
+  const id = allocId(state);
+  setResearch(state, id, createResearch(nodeId, warehouseId, drainRate, cost, startingConsumed, t));
+  deriveAll(state);
+  return id;
+}
+
+// Free the active research slot at t and report the node's absolute consumed there — one
+// command for both cancel (mid-progress, so the app banks the returned value against the
+// node) and collect (already complete, returns cost). Stops the drain (zeroes the pool's
+// pull — idempotent if the completion handler already did) and removes the entry. Progress is
+// carried by the returned value, never decayed (DESIGN.md: resume where you left off).
+export function clearResearch(state: SimState, t: number, id: Id): number {
+  const research = getResearch(state, id); // validates the slot exists
+  advance(state, t);
+  reanchorResearch(research, t); // bring consumed to t using the last-derived rate
+  const consumed = research.anchorConsumed;
+  getWarehouse(state, research.warehouseId).pullRate = 0;
+  state.research.delete(id);
+  deriveAll(state);
+  return consumed;
+}
+
+// Reconcile each knowledge pool's pull with its research entry's completion state after a load.
+// The pool pull IS the node's drain, and `drainRate` is its authoritative rate — so an active
+// node's pool pulls `drainRate`, a completed one pulls 0. deserializeState trusts the doc's pull
+// otherwise, but serialize.copyResearch clamps a consumed above a lowered cost up to cost, which
+// can turn an active mid-drain entry into a COMPLETE one without the completion handler ever
+// running to zero the pull — the pool would keep draining knowledge into a finished node until
+// the app happened to clear it. Re-derive only when a pull actually changes, so a faithful save
+// (already consistent) round-trips untouched.
+export function reconcileResearchOnLoad(state: SimState): void {
+  let changed = false;
+  forEachResearch(state, (_id, research) => {
+    const desired = research.anchorConsumed >= research.cost ? 0 : research.drainRate;
+    const pool = getWarehouse(state, research.warehouseId);
+    if (pool.pullRate !== desired) {
+      pool.pullRate = desired;
+      changed = true;
+    }
+  });
+  if (changed) {
+    deriveAll(state);
+  }
 }

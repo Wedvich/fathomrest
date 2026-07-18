@@ -9,6 +9,7 @@
 export type { Id } from "./ids.ts";
 export { resourceType, type ResourceType } from "./resource.ts";
 export { islandId, type IslandId } from "./island.ts";
+export { researchNodeId, type ResearchNodeId } from "./researchNode.ts";
 export type { PrngState } from "./prng.ts";
 export { offlineElapsedSeconds } from "./clock.ts";
 export type { EventKind, EventQueue, SimEvent } from "./events.ts";
@@ -39,6 +40,7 @@ export {
   isIslandRegistered,
   type IslandProgress,
 } from "./components/island-progress.ts";
+export { forEachResearch, getResearch, researchIds, type Research } from "./components/research.ts";
 export { forEachRoute, getRoute, routeIds, type Route } from "./components/route.ts";
 export {
   forEachWarehouse,
@@ -58,6 +60,7 @@ export {
   buildConverter,
   buildExtractor,
   canAffordBuild,
+  clearResearch,
   converterDraw,
   converterFeed,
   depositMultiplier,
@@ -68,10 +71,12 @@ export {
   InsufficientStockError,
   islandExtractionMultiplier,
   islandXpAt,
+  registerIsland,
+  researchConsumedAt,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
-  registerIsland,
+  startResearch,
   upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,

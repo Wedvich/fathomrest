@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getWarehouse } from "./components/warehouse.ts";
 import { islandId } from "./island.ts";
+import { researchNodeId } from "./researchNode.ts";
 import { resourceType } from "./resource.ts";
 import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
@@ -15,6 +16,7 @@ import {
   buildConverter,
   buildExtractor,
   canAffordBuild,
+  clearResearch,
   converterDraw,
   converterFeed,
   depositMultiplier,
@@ -25,10 +27,12 @@ import {
   islandExtractionMultiplier,
   islandXpAt,
   InsufficientStockError,
+  researchConsumedAt,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
   registerIsland,
+  startResearch,
   upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,
@@ -904,5 +908,146 @@ describe("island XP", () => {
     advance(state, 50);
     expect(islandXpAt(state, I, 50)).toBe(0);
     expect(islandExtractionMultiplier(state, I)).toBe(1);
+  });
+});
+
+// Research as the analytic drain (DESIGN.md Progression/Research): a knowledge pool fed by an
+// extractor, drained by the active node. Reuses the pool's pullRate + empty-throttle machinery,
+// so an empty pool stalls at income and a fed pool runs at the drain rate — one code path online
+// and offline. The resource tag is irrelevant to the drain; R stands in for "knowledge".
+const NODE = researchNodeId("node-a");
+
+// A knowledge pool (cap 100) with a floor producer at `inflowRate`, seeded to `seed`, then a node
+// started draining at `drain` toward `cost` from a fresh 0. Returns handles for the assertions.
+function researchScenario(opts: {
+  inflowRate: number;
+  seed: number;
+  drain: number;
+  cost: number;
+}): {
+  state: SimState;
+  poolId: ReturnType<typeof addWarehouse>;
+  researchId: ReturnType<typeof startResearch>;
+} {
+  const state = createSimState(1, 0);
+  const poolId = addWarehouse(state, 0, R, I, 100);
+  const depositId = addDeposit(state, 0, R, [], 1); // perpetual floor producer at ×1
+  if (opts.inflowRate > 0) {
+    addExtractor(state, 0, opts.inflowRate, depositId, poolId);
+  }
+  if (opts.seed > 0) {
+    grantResource(state, 0, poolId, opts.seed);
+  }
+  const researchId = startResearch(state, 0, NODE, poolId, opts.drain, opts.cost, 0);
+  return { state, poolId, researchId };
+}
+
+describe("research drain", () => {
+  it("drains the pool at the base rate and completes at cost/rate when the pool keeps up", () => {
+    // Inflow 2 > drain 1, so the pool never starves: the node consumes a steady 1/s.
+    const { state, poolId, researchId } = researchScenario({
+      inflowRate: 2,
+      seed: 0,
+      drain: 1,
+      cost: 10,
+    });
+    expect(researchConsumedAt(state, researchId, 5)).toBe(5); // query runs ahead of advance
+    advance(state, 10);
+    expect(researchConsumedAt(state, researchId, 10)).toBe(10); // complete at cost/rate = 10s
+    // Completion zeroes the drain: the pool stops being pulled and the node holds at cost.
+    expect(getWarehouse(state, poolId).pullRate).toBe(0);
+    advance(state, 1_000);
+    expect(researchConsumedAt(state, researchId, 1_000)).toBe(10); // never over-consumes past cost
+  });
+
+  it("stalls at the banked amount when the pool empties with no income", () => {
+    // No producer: the pool holds 30, drains it, then stalls — progress freezes below cost.
+    const { state, poolId, researchId } = researchScenario({
+      inflowRate: 0,
+      seed: 30,
+      drain: 1,
+      cost: 100,
+    });
+    advance(state, 1_000);
+    expect(warehouseAmountAt(state, poolId, 1_000)).toBe(0);
+    expect(researchConsumedAt(state, researchId, 1_000)).toBe(30); // stalled, never fails
+  });
+
+  it("proceeds at the income rate once the pool runs dry (full-fidelity stall)", () => {
+    // Inflow 0.5 < drain 1: the pool (seeded 30) drains at net −0.5 and empties at 60s, having
+    // consumed 60 at the full drain rate; after that the node consumes only the 0.5/s income.
+    const { state, poolId, researchId } = researchScenario({
+      inflowRate: 0.5,
+      seed: 30,
+      drain: 1,
+      cost: 100,
+    });
+    // The rate drops at the pool-empty event (t=60), so — like warehouseAmountAt — the query is
+    // only exact once advance has crossed that event.
+    advance(state, 60);
+    expect(researchConsumedAt(state, researchId, 60)).toBe(60); // consumed at the full rate until dry
+    expect(warehouseAmountAt(state, poolId, 60)).toBe(0);
+    advance(state, 100);
+    expect(researchConsumedAt(state, researchId, 100)).toBe(80); // 60 + 0.5 × 40, now at income rate
+    advance(state, 140);
+    expect(researchConsumedAt(state, researchId, 140)).toBe(100); // completes at 60 + 40/0.5 = 140s
+  });
+
+  it("catches up offline in one advance identically to a stalled fed pool", () => {
+    // The offline path is the same math: a single advance across the whole gap lands on the same
+    // completion the incremental query predicts.
+    const { state, researchId } = researchScenario({
+      inflowRate: 0.5,
+      seed: 30,
+      drain: 1,
+      cost: 100,
+    });
+    advance(state, 5_000);
+    expect(researchConsumedAt(state, researchId, 5_000)).toBe(100);
+  });
+
+  it("rejects a second node while one is active (single slot, queue depth 0)", () => {
+    const { state, poolId } = researchScenario({ inflowRate: 2, seed: 0, drain: 1, cost: 10 });
+    expect(() => startResearch(state, 5, researchNodeId("node-b"), poolId, 1, 10, 0)).toThrow(
+      /already active/,
+    );
+  });
+
+  it("frees the slot on cancel and resumes preserved progress on restart", () => {
+    // Cancel at 43% banks the absolute consumed; a fresh start seeded with it resumes there.
+    const { state, poolId, researchId } = researchScenario({
+      inflowRate: 2,
+      seed: 0,
+      drain: 1,
+      cost: 100,
+    });
+    advance(state, 43);
+    const banked = clearResearch(state, 43, researchId);
+    expect(banked).toBe(43);
+    expect(getWarehouse(state, poolId).pullRate).toBe(0); // drain stopped on cancel
+    const resumed = startResearch(state, 43, NODE, poolId, 1, 100, banked);
+    advance(state, 50);
+    expect(researchConsumedAt(state, resumed, 50)).toBe(50); // 43 banked + 7s at 1/s
+  });
+
+  it("leaves no dangling completion event after a cancel", () => {
+    // Cancelling deletes the node while its completion event is still queued; advancing past
+    // when it would have fired, and serializing, must treat that orphan as stale, not throw.
+    const { state, researchId } = researchScenario({ inflowRate: 2, seed: 0, drain: 1, cost: 100 });
+    clearResearch(state, 10, researchId); // completion was pending at t=100
+    expect(() => advance(state, 500)).not.toThrow();
+    expect(serializeState(state).research).toHaveLength(0);
+    expect(serializeState(state).events).toHaveLength(0); // the orphaned completion is filtered out
+  });
+
+  it("validates its inputs at the command boundary", () => {
+    const state = createSimState(1, 0);
+    const poolId = addWarehouse(state, 0, R, I, 100);
+    expect(() => startResearch(state, 0, researchNodeId(""), poolId, 1, 10, 0)).toThrow(/nodeId/);
+    expect(() => startResearch(state, 0, NODE, poolId, 0, 10, 0)).toThrow(/drainRate/);
+    expect(() => startResearch(state, 0, NODE, poolId, 1, 0, 0)).toThrow(/cost/);
+    // startingConsumed at or above cost is a completed node, not a startable one.
+    expect(() => startResearch(state, 0, NODE, poolId, 1, 10, 10)).toThrow(/startingConsumed/);
+    expect(() => startResearch(state, 0, NODE, poolId, 1, 10, -1)).toThrow(/startingConsumed/);
   });
 });

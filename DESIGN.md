@@ -124,6 +124,23 @@ ingredients, never structural edges into the island trees.
 - Unlock categories: buildings, **in-place building upgrades** (e.g. warehouse
   upgrade — a build verb alongside placement), economy modifiers (decay/floors),
   island-tree gates, expedition tech, **research/meta** (queue depth, drain rate).
+- **Shipped (vertical slice — the drain mechanic):** the active node is a core
+  `Research` component that OWNS the knowledge pool's `pullRate` (drainRate while
+  active, zeroed at completion), so the existing warehouse empty-throttle machinery
+  gives the full-fidelity stall (empty pool → drain at income, never fails) and the
+  offline path for free — the same converter math, one code path. Progress is the
+  node's **absolute consumed**, anchored closed-form like a warehouse amount and
+  clamped to cost at load; completion is a scheduled `research-complete` event that
+  pins consumed at cost and stops the drain (so a long offline jump can't over-drain
+  a finished node). **Single active slot** (queue depth 0) enforced at the command
+  (`startResearch`) and import boundaries. Free swap/cancel is `clearResearch`,
+  which returns the banked consumed; the app keeps **per-node progress** for the
+  inactive nodes (the active node's live progress is the single source of truth in
+  core) and resumes a node from its banked value. Nodes are app-authored content
+  (flat list, knowledge-only cost); **completing a node has no gameplay effect yet**
+  — the unlock categories above land in part 3. No content-version step was needed
+  (research adds no core state on upgrade); the core save gained a `research` table
+  as a v3→v4 migration.
 
 ### Knowledge
 

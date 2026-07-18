@@ -3,12 +3,16 @@ import {
   canAffordBuild,
   depositMultiplier,
   depositRemainingAt,
+  forEachResearch,
   getDeposit,
   getWarehouse,
   islandXpAt,
   warehouseAmountAt,
   warehouseOutflowRate,
+  type Id,
   type IslandId,
+  type Research,
+  type ResearchNodeId,
   type ResourceType,
 } from "@fathomrest/core";
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
@@ -26,6 +30,8 @@ import {
   buildExtractor,
   buyNode,
   canBuyNode,
+  cancelResearch,
+  collectCompletedResearch,
   createDemoWorld,
   type DemoWorld,
   isConverterBuilt,
@@ -33,10 +39,15 @@ import {
   islandLevel,
   islandLevelCeilXp,
   islandLevelFloorXp,
+  isResearchActive,
+  isResearched,
   nextStorageTier,
+  type ResearchNode,
+  researchConsumedGiven,
   restoreWorld,
   type SavedWorld,
   snapshotWorld,
+  startResearch,
   type StorageTier,
   upgradeStorage,
   worldIslands,
@@ -185,12 +196,20 @@ export function PixiReadout(): React.JSX.Element {
       }
       if (disposed) return;
 
+      // Research is offered only once the knowledge pool exists (a pre-knowledge save whose
+      // content upgrade hasn't landed hides the whole section rather than showing dead rows).
+      const researchNodes: readonly ResearchNode[] =
+        world.knowledgePoolId === undefined ? [] : world.researchNodes;
+
       await app.init({
         width: WIDTH,
         height:
           PADDING * 2 +
           ROW_HEIGHT *
-            (world.warehouses.length + world.deposits.length + worldIslands(world).length),
+            (world.warehouses.length +
+              world.deposits.length +
+              worldIslands(world).length +
+              researchNodes.length),
         background: 0x0e1a24,
         antialias: true,
         resolution: window.devicePixelRatio,
@@ -323,12 +342,9 @@ export function PixiReadout(): React.JSX.Element {
 
       // Island XP bars: one per island with a skill tree (registered islands). Shows progress
       // within the current level; a distinct tint from warehouses (blue) and deposits (amber).
+      const islandRowBase = world.warehouses.length + world.deposits.length;
       worldIslands(world).forEach((island, i) => {
-        const { fill, readout } = makeBar(
-          `${island} XP`,
-          world.warehouses.length + world.deposits.length + i,
-          0x9b7fd6,
-        );
+        const { fill, readout } = makeBar(`${island} XP`, islandRowBase + i, 0x9b7fd6);
         let lastFrac = NaN;
         let lastText = "";
         rows.push({
@@ -352,6 +368,54 @@ export function PixiReadout(): React.JSX.Element {
             if (text !== lastText) {
               lastText = text;
               readout.text = text;
+            }
+          },
+        });
+      });
+
+      // The single active research drain, refreshed once per frame (single slot, so a hoisted
+      // scan closure with no per-frame allocation — perf doc: the frame loop must not allocate).
+      // The research rows and buttons read these instead of re-scanning core per node.
+      let activeResearchId: Id | null = null;
+      let activeResearchNodeId: ResearchNodeId | null = null;
+      const scanActiveResearch = (id: Id, research: Research): void => {
+        activeResearchId = id;
+        activeResearchNodeId = research.nodeId;
+      };
+
+      // A research node's consumed at t, via the shared world reader fed this frame's hoisted active
+      // scan (no allocation, no core rescan per node). One rule, defined in world.ts.
+      const nodeConsumed = (node: ResearchNode, t: number): number =>
+        researchConsumedGiven(world, node, activeResearchId, activeResearchNodeId, t);
+
+      // Research rows sit after the island XP bars; a distinct tint (teal) from islands (purple).
+      const researchRowBase = islandRowBase + worldIslands(world).length;
+      researchNodes.forEach((node, i) => {
+        const { fill, readout } = makeBar(`⚑ ${node.label}`, researchRowBase + i, 0x5fc4b0);
+        let lastFrac = NaN;
+        let lastConsumed = NaN;
+        let lastStatus = "";
+        rows.push({
+          update: (t): void => {
+            const consumed = nodeConsumed(node, t);
+            const frac = node.cost > 0 ? consumed / node.cost : 0;
+            if (frac !== lastFrac) {
+              lastFrac = frac;
+              setFrac(fill, frac);
+            }
+            const active = activeResearchNodeId === node.id;
+            // floor to never show progress the drain hasn't reached; epsilon absorbs analytic
+            // float error so a logical 40 at 39.9999999999 doesn't read 39.
+            const roundedConsumed = Math.floor(consumed + 1e-9);
+            let status = "";
+            if (active) status = "researching";
+            else if (consumed >= node.cost) status = "researched";
+            else if (consumed > 0) status = "paused";
+            if (roundedConsumed !== lastConsumed || status !== lastStatus) {
+              lastConsumed = roundedConsumed;
+              lastStatus = status;
+              const suffix = status === "" ? "" : `  (${status})`;
+              readout.text = `${roundedConsumed} / ${node.cost}${suffix}`;
             }
           },
         });
@@ -501,9 +565,54 @@ export function PixiReadout(): React.JSX.Element {
         });
       }
 
+      // Research buttons: one per node. Research is a drain with no upfront cost (DESIGN.md), so
+      // there is no affordability gate — a node is always startable (an empty pool just stalls it).
+      // Clicking the active node cancels it; clicking another node swaps to it (banking the
+      // outgoing node's progress). The active-state decision reads core at click time, not the
+      // per-frame scan, so it can't act on a stale frame.
+      for (const node of researchNodes) {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.addEventListener("click", () => {
+          const t = epochAtStart + clock.now();
+          const acted = isResearchActive(world, node)
+            ? cancelResearch(world, t)
+            : startResearch(world, node, t);
+          if (acted) requestSave?.();
+        });
+        controls.appendChild(el);
+        let lastLabel: string | null = null;
+        let lastDisabled: boolean | null = null;
+        buttons.push({
+          update: (): void => {
+            const researched = isResearched(world, node);
+            const active = activeResearchNodeId === node.id;
+            let label = `Research ${node.label} (${node.cost} knowledge)`;
+            if (researched) label = `${node.label} — researched`;
+            else if (active) label = `Cancel — ${node.label}`;
+            if (label !== lastLabel) {
+              lastLabel = label;
+              el.textContent = label;
+            }
+            const disabled = researched;
+            if (disabled !== lastDisabled) {
+              lastDisabled = disabled;
+              el.disabled = disabled;
+            }
+          },
+        });
+      }
+
       const tick = (): void => {
         const t = epochAtStart + clock.now();
         advance(world.state, t);
+        // Bank a node that finished this frame (online or across an offline jump) before rendering,
+        // so its bar reads "researched" the same frame the drain crossed cost; persist that.
+        if (collectCompletedResearch(world, t)) requestSave?.();
+        // Refresh the active-research scan for this frame's row/button reads (no per-node rescan).
+        activeResearchId = null;
+        activeResearchNodeId = null;
+        forEachResearch(world.state, scanActiveResearch);
         // Indexed loop: iterator protocol allocates per step on JSC (perf doc, frame loop).
         for (let i = 0; i < rows.length; i++) {
           rows[i]?.update(t);

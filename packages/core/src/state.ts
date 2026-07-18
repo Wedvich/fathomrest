@@ -2,6 +2,7 @@ import type { Converter } from "./components/converter.ts";
 import type { Deposit } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
 import type { IslandProgress } from "./components/island-progress.ts";
+import type { Research } from "./components/research.ts";
 import type { IslandId } from "./island.ts";
 import type { Route } from "./components/route.ts";
 import type { Warehouse } from "./components/warehouse.ts";
@@ -28,6 +29,9 @@ export interface SimState {
   routes: Map<Id, Route>;
   converters: Map<Id, Converter>;
   islandProgress: Map<IslandId, IslandProgress>;
+  // The active research drain (DESIGN.md Progression/Research). At most one entry — the
+  // queue is depth 0 (single active slot); enqueued nodes are app content, not core state.
+  research: Map<Id, Research>;
 }
 
 export function createSimState(seed: number, wallTimeMs: number): SimState {
@@ -43,6 +47,7 @@ export function createSimState(seed: number, wallTimeMs: number): SimState {
     routes: new Map(),
     converters: new Map(),
     islandProgress: new Map(),
+    research: new Map(),
   };
 }
 
