@@ -60,15 +60,20 @@ start, not from this work) — fine to keep, just not part of the knowledge chan
 
 ## Next session
 
-1. **Research queue (part 2 of the research track).** With knowledge now produced, build the
-   timed research queue (DESIGN.md "Research (global)"): full knowledge cost paid **upfront at
-   enqueue**, timer runs offline at full fidelity, **queue depth 2** (banking knowledge past
-   the cap when queued is intended). This is the first thing that _spends_ knowledge and
-   turns the "jam at cap" into the "come spend me" prompt.
+1. **Research drain (part 2 of the research track).** With knowledge now produced, build
+   active research per the **redesigned** DESIGN.md "Research (global)" (2026-07-18 —
+   supersedes the old upfront-cost/queue-depth-2 plan): a Factorio-style **continuous
+   drain** at a global base rate (duration = cost ÷ rate; empty pool stalls, never fails),
+   full-fidelity offline via the converter math, per-node **absolute consumed** progress
+   preserved across free cancel/swap. **Queue depth starts at 0** (active slot only; depth
+   is itself research-unlocked later — research/meta category), so part 2 needs no queue
+   machinery beyond the single active slot. This is the first thing that _spends_
+   knowledge and turns the "jam at cap" into the "come spend me" prompt.
 2. **Thin unlock tree (part 3).** A few research nodes across the unlock categories
    (buildings, in-place building upgrades, economy modifiers, island-tree gates). First
    concrete payoff: **research-gate the storage upgrade** (it shipped cost-gated only —
-   DESIGN.md unlock category "in-place building upgrades").
+   DESIGN.md unlock category "in-place building upgrades"). Include a **research/meta**
+   node raising queue depth 0→1 — the queue machinery lands here, as an unlock.
 3. Then the two-track's second track: **Island XP + skill tree** (throughput-fed XP,
    trunk + Extraction/Refinement branches, junction research-gated).
 

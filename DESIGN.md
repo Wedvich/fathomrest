@@ -100,15 +100,30 @@ ingredients, never structural edges into the island trees.
 - Paced by **knowledge** (a global-scoped resource, below) **plus resource-sample
   gates** on bigger nodes — rare samples come from expeditions. All three systems
   (idle extraction, expeditions, refinement) feed research.
-- **Research is timed** (RTS-style): the full knowledge cost is paid upfront and the
-  timer runs offline at full fidelity. A deliberate, documented exception to
-  "waiting never wins" — bounded because research is one pipeline and the knowledge
-  cap stalls everything downstream.
-- **Queue depth 2** (a tunable knob). A queued node is paid **at enqueue** — no
-  offline stalls, and queueing banks knowledge past the cap (intended).
+- **Research is a drain, not a purchase** (Factorio-style): no upfront cost. The
+  active node consumes knowledge continuously at a **global base drain rate** (one
+  tunable knob; upgradeable later via labs/research); node duration = cost ÷ rate
+  when fed. Empty pool → progress **stalls, never fails**. Runs offline at full
+  fidelity with the same math as converters (extractor feeds pool, research drains
+  it), so offline research is bounded by banked knowledge + income — no longer a
+  real exception to "waiting never wins".
+- **Progress is preserved**: per-node **absolute knowledge consumed** (complete at
+  `consumed ≥ cost`, clamped to cost at load so rebalancing can't strand progress),
+  no decay. The active node can be **swapped freely** — cancel at 43%, resume later
+  at 43%.
+- **Resource-sample gates** (bigger nodes): samples are consumed **once, at first
+  start** — a discrete entry fee, recorded in the node's progress; no refund on
+  cancel, never re-charged on resume. Knowledge is the only over-time component.
+- **Queue starts at depth 0** (active slot only); depth is raised by research nodes
+  (the **research/meta** unlock category — seed of a technology-focused playstyle
+  branch, and the check on queueing the whole tree passively). Enqueueing is free;
+  a queued node whose prerequisites resolve mid-queue starts automatically, so
+  dependency chains can be planned ahead. A blocked node (missing samples) **holds**
+  the queue rather than being skipped. There is no bank-past-cap via the queue —
+  active research draining the pool is the only cap-pressure relief.
 - Unlock categories: buildings, **in-place building upgrades** (e.g. warehouse
   upgrade — a build verb alongside placement), economy modifiers (decay/floors),
-  island-tree gates, expedition tech.
+  island-tree gates, expedition tech, **research/meta** (queue depth, drain rate).
 
 ### Knowledge
 
