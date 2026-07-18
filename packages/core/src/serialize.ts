@@ -24,7 +24,7 @@ import type { SimState } from "./state.ts";
 // entry arrays, events as a sorted list. One codec for export, import, and future cloud
 // sync — the schema never forks.
 
-const SAVE_VERSION = 5;
+const SAVE_VERSION = 6;
 
 export type TableEntries<T> = [Id, T][];
 
@@ -362,6 +362,7 @@ function validateDocument(doc: SaveDocument): void {
     checkFinite(progress.xpAnchorTime, `islandProgress[${island}].xpAnchorTime`);
     checkNonNegative(progress.xpRate, `islandProgress[${island}].xpRate`);
     checkPositive(progress.extractionMultiplier, `islandProgress[${island}].extractionMultiplier`);
+    checkPositive(progress.refinementMultiplier, `islandProgress[${island}].refinementMultiplier`);
   }
   // Single active slot (queue depth 0, DESIGN.md): at most one research entry, so a
   // hand-edited save with two drains can't quietly double-consume the pool.
@@ -449,6 +450,20 @@ function migrateDocument(doc: SaveDocument): SaveDocument {
   // save keeps its idle progress and simply starts with the slot free.
   if (migrated.version === 4) {
     migrated = { ...migrated, version: 5, research: [] };
+  }
+  // v5 predates the refinement branch: backfill refinementMultiplier at identity (1) so existing
+  // island progress keeps its extraction bonus and converters stay at their content yield.
+  if (migrated.version === 5) {
+    migrated = {
+      ...migrated,
+      version: 6,
+      islandProgress: migrated.islandProgress.map(
+        ([island, progress]): [IslandId, IslandProgress] => [
+          island,
+          { ...progress, refinementMultiplier: 1 },
+        ],
+      ),
+    };
   }
   return migrated;
 }

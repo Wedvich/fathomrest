@@ -52,6 +52,7 @@ export {
 export {
   addConverter,
   applyExtractionMultiplier,
+  applyRefinementMultiplier,
   addDeposit,
   addExtractor,
   addRoute,
@@ -70,6 +71,7 @@ export {
   grantResource,
   InsufficientStockError,
   islandExtractionMultiplier,
+  islandRefinementMultiplier,
   islandXpAt,
   registerIsland,
   researchConsumedAt,

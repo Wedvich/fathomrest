@@ -136,11 +136,17 @@ async function main() {
   assert((await storage.textContent()) === afterLabel, "label stable after the upgrade");
 
   // --- Skill tree: HOME accrues XP from throughput; a trunk node gates on level + cost, the
-  // research-gated junction stays locked ---
-  // The junction node is present but permanently locked (research doesn't exist yet).
+  // junction gates on completed research (Tidal Almanac) + branch exclusivity ---
+  // The junction node is present but locked: this drive only completes Survey Cache, so its gating
+  // research (Tidal Almanac) is unmet — the label carries that reason.
   const junction = page.getByRole("button", { name: /Extraction Mastery/ });
   await junction.waitFor({ timeout: 5_000 });
-  assert(await junction.isDisabled(), "research-gated junction node stays locked");
+  assert(await junction.isDisabled(), "junction node locked while its research is unmet");
+  const junctionLabel = await junction.textContent();
+  assert(
+    /research required/.test(junctionLabel ?? ""),
+    `junction shows the research-required lock reason, got "${junctionLabel}"`,
+  );
 
   // The trunk node "Efficient Tools" (level 2, 40 wood + 40 stone) enables once XP has passed
   // level 2 and the pools have re-accrued 40/40 after the storage spend; buying flips it to owned.

@@ -23,9 +23,11 @@ import {
   addRoute,
   addWarehouse,
   advance,
+  applyRefinementMultiplier,
   converterDraw,
   converterFeed,
   grantIslandXp,
+  islandRefinementMultiplier,
   islandXpAt,
   registerIsland,
   researchConsumedAt,
@@ -536,18 +538,32 @@ describe("island progression serialization", () => {
     registerIsland(state, 0, I);
     addExtractor(state, 0, 2, dep, wh);
     applyExtractionMultiplier(state, 5, new Map(), I, 1.5); // cost-free node effect
+    applyRefinementMultiplier(state, 5, new Map(), I, 1.25); // cost-free refinement-branch effect
     grantIslandXp(state, 8, I, 40);
     advance(state, 30);
     return state;
   };
 
-  it("round-trips island XP and the extraction multiplier", () => {
+  it("round-trips island XP and the extraction/refinement multipliers", () => {
     const state = buildWithIsland();
     const doc = serializeState(state);
     const restored = deserializeState(doc);
     // The accumulator restores to the same closed form, and the document reserializes identically.
     expect(islandXpAt(restored, I, 30)).toBeCloseTo(islandXpAt(state, I, 30), 9);
+    expect(islandRefinementMultiplier(restored, I)).toBeCloseTo(1.25, 9);
     expect(serializeState(restored)).toStrictEqual(doc);
+  });
+
+  it("migrates a v5 save by backfilling refinementMultiplier at identity", () => {
+    // A pre-refinement (v5) document: current island-progress entries minus refinementMultiplier.
+    const doc = serializeState(buildWithIsland());
+    const islandProgress = doc.islandProgress.map(([island, p]): [typeof island, typeof p] => {
+      const { refinementMultiplier: _drop, ...rest } = p;
+      return [island, rest as typeof p];
+    });
+    const restored = deserializeState({ ...doc, islandProgress, version: 5 } as SaveDocument);
+    // Backfilled to identity, so converters keep their content yield; the extraction bonus survives.
+    expect(islandRefinementMultiplier(restored, I)).toBe(1);
   });
 
   it("migrates a v3 save by backfilling an empty island-progress table", () => {

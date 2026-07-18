@@ -13,6 +13,7 @@ import {
   addRoute,
   addWarehouse,
   advance,
+  applyRefinementMultiplier,
   buildConverter,
   buildExtractor,
   canAffordBuild,
@@ -25,6 +26,7 @@ import {
   grantIslandXp,
   grantResource,
   islandExtractionMultiplier,
+  islandRefinementMultiplier,
   islandXpAt,
   InsufficientStockError,
   researchConsumedAt,
@@ -360,6 +362,31 @@ describe("converters", () => {
     expect(converterDraw(state, converter)).toBe(2);
     // Backpressure lands in the source's own units: it now keeps 5 - 2 = 3 ore/s.
     expect(warehouseAmountAt(state, source, 200)).toBe(400);
+  });
+
+  it("a refinement-branch multiplier scales the yield without changing the source draw", () => {
+    const { state, source, dest, converter } = refinery();
+    registerIsland(state, 0, I);
+    applyRefinementMultiplier(state, 0, new Map(), I, 1.5); // cost-free refinement node
+    expect(islandRefinementMultiplier(state, I)).toBeCloseTo(1.5, 9);
+    // Draw is still cap-limited at 4 ore/s (source units unchanged); yield lifts 2 -> 3 ingot/s.
+    expect(converterDraw(state, converter)).toBe(4);
+    expect(converterFeed(state, converter)).toBeCloseTo(3, 9);
+    // Source still keeps 5 - 4 = 1 ore/s; dest gains 3 ingot/s until it jams (cap 100) at ~t=33.
+    expect(warehouseAmountAt(state, source, 10)).toBeCloseTo(10, 9);
+    expect(warehouseAmountAt(state, dest, 10)).toBeCloseTo(30, 9);
+  });
+
+  it("keeps refinement-boosted acceptance in destination units when the dest jams", () => {
+    const { state, dest, converter } = refinery();
+    registerIsland(state, 0, I);
+    applyRefinementMultiplier(state, 0, new Map(), I, 1.5); // effective ratio 0.5 * 1.5 = 0.75
+    setWarehousePullRate(state, 0, dest, 1); // ingots leave slower than the boosted feed
+    advance(state, 200);
+    expect(getWarehouse(state, dest).regime).toBe("pinned-full");
+    // Acceptance is 1 ingot/s; the draw backs off to 1 / 0.75 ore/s, feed holds at 1 ingot/s.
+    expect(converterFeed(state, converter)).toBeCloseTo(1, 9);
+    expect(converterDraw(state, converter)).toBeCloseTo(1 / 0.75, 9);
   });
 
   it("water-fills a starved source between a route and a converter", () => {

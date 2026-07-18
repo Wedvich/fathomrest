@@ -9,7 +9,9 @@ import type { SimState } from "../state.ts";
 //     the rate that other events already re-anchor it at. Lump grants (expedition/milestone
 //     XP) re-anchor then bump xpAnchor, exactly like grantResource on a warehouse.
 //   - Skill-node modifiers. extractionMultiplier scales every extractor on the island
-//     (sim.ts: extractorEffectiveRate) — the "nodes are the multiplier" lever. 1 is the
+//     (sim.ts: extractorEffectiveRate); refinementMultiplier scales the yield of every
+//     converter producing INTO the island (sim.ts: converterEffectiveRatio) — the two halves
+//     of the "nodes are the multiplier" lever (extraction vs refinement branch). 1 is the
 //     identity (a freshly registered island).
 // Keyed by IslandId (islands are app-authored content tags, not core entities), so this table
 // is Map<IslandId, IslandProgress> rather than the usual Map<Id, T>. An island has XP only
@@ -19,6 +21,7 @@ export interface IslandProgress {
   xpAnchorTime: number;
   xpRate: number;
   extractionMultiplier: number;
+  refinementMultiplier: number;
 }
 
 export function createIslandProgress(anchorTime: number): IslandProgress {
@@ -27,6 +30,7 @@ export function createIslandProgress(anchorTime: number): IslandProgress {
     xpAnchorTime: anchorTime,
     xpRate: 0,
     extractionMultiplier: 1,
+    refinementMultiplier: 1,
   };
 }
 

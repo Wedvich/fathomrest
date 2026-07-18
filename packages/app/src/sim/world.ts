@@ -3,6 +3,7 @@ import {
   addWarehouse,
   advance,
   applyExtractionMultiplier,
+  applyRefinementMultiplier,
   canAffordBuild,
   buildConverter as buildConverterCmd,
   buildExtractor as buildExtractorCmd,
@@ -195,6 +196,10 @@ const RESEARCH_NODES: readonly ResearchNode[] = [
   { id: researchNodeId("tidal-almanac"), label: "Tidal Almanac", cost: 100 },
 ];
 
+const RESEARCH_NODES_BY_ID: ReadonlyMap<ResearchNodeId, ResearchNode> = new Map(
+  RESEARCH_NODES.map((node) => [node.id, node]),
+);
+
 // True for the distinguished global scope: its pools sit outside every per-island system —
 // the storage ladder today, island XP later. Island-enumerating features must filter through
 // this predicate rather than re-deriving the exclusion.
@@ -204,13 +209,13 @@ export function isGlobalScope(island: IslandId): boolean {
 
 // ── Island skill tree (DESIGN.md: island specialization) ──────────────────────────────────
 // App-authored node content over the core IslandProgress primitive (throughput-fed XP
-// accumulator + extraction multiplier). Shipped this pass: the XP accumulator and a shared
-// TRUNK of instant, level- and cost-gated nodes whose effect is an island extraction
-// multiplier ("nodes are the multiplier", DESIGN.md). The exclusive junction into
-// Extraction/Refinement branches is defined structurally but research-gated — and the research
-// track doesn't exist yet, so those nodes are stubbed LOCKED (researchGated). TODO: when
-// research lands, gate the junction on a real research node and enforce branch exclusivity
-// (picking one branch locks the other); gating stays one-way research -> island.
+// accumulator + extraction/refinement multipliers). A shared TRUNK of instant, level- and
+// cost-gated nodes whose effect is an island extraction multiplier ("nodes are the multiplier",
+// DESIGN.md), then an EXCLUSIVE junction into an Extraction or a Refinement branch: the junction
+// nodes gate on a completed research node (researchRequired) AND on branch exclusivity — buying
+// into one branch locks the other for good (nodeUnlocked). Gating stays one-way research -> island.
+// A node's branch also selects its effect: extraction/trunk scale the island's extraction
+// multiplier, refinement scales its refinement (converter-yield) multiplier (buyNode).
 export interface SkillNode {
   readonly id: string;
   readonly island: IslandId;
@@ -221,10 +226,11 @@ export interface SkillNode {
   readonly levelRequired: number;
   readonly cost: readonly (readonly [ResourceType, number])[];
   readonly prerequisites: readonly string[];
-  // Factor multiplied into the island's extraction multiplier on purchase.
+  // Factor multiplied into the island's extraction (trunk/extraction) or refinement (refinement)
+  // multiplier on purchase, per branch.
   readonly effectFactor: number;
-  // Junction nodes gate behind research that doesn't exist yet — stubbed locked until then.
-  readonly researchGated?: boolean;
+  // Junction nodes stay locked until this research node is completed (one-way research -> island).
+  readonly researchRequired?: ResearchNodeId;
 }
 
 // XP required to REACH each level (index 0 = level 1 at 0 XP). islandLevel counts thresholds at
@@ -304,7 +310,7 @@ const HOME_SKILL_TREE: readonly SkillNode[] = [
     ],
     prerequisites: ["home-quarry-discipline"],
     effectFactor: 1.3,
-    researchGated: true,
+    researchRequired: researchNodeId("tidal-almanac"),
   },
   {
     id: "home-refinement-mastery",
@@ -318,7 +324,7 @@ const HOME_SKILL_TREE: readonly SkillNode[] = [
     ],
     prerequisites: ["home-quarry-discipline"],
     effectFactor: 1.1,
-    researchGated: true,
+    researchRequired: researchNodeId("tidal-almanac"),
   },
 ];
 
@@ -742,10 +748,33 @@ export function islandXpView(world: DemoWorld, island: IslandId, t: number): Isl
   };
 }
 
-// Shared purchasability guard (the non-cost half): known island level, prerequisites, ownership,
-// and the research-gate stub. buyNode and canBuyNode share it so their rules can't drift.
+// Whether the node's branch is locked out because the player has already committed to the OPPOSITE
+// specialization branch ON THIS ISLAND (the exclusive junction is per-island — it locks an
+// island's identity, DESIGN.md; a choice on one island never gates another). Trunk nodes belong to
+// no branch and are never branch-locked. Exposed for the UI's lock-reason label.
+export function isNodeBranchLocked(world: DemoWorld, node: SkillNode): boolean {
+  if (node.branch === "trunk") return false;
+  const opposite = node.branch === "extraction" ? "refinement" : "extraction";
+  return world.purchasedNodes.some((id) => {
+    const owned = SKILL_NODES.get(id);
+    return owned?.island === node.island && owned.branch === opposite;
+  });
+}
+
+// Whether the node is still gated by an unfinished research prerequisite (one-way research ->
+// island). Nodes with no researchRequired are never research-locked; an unknown id reads locked
+// (defensive — a miswired gate must not silently open). Exposed for the UI's lock-reason label.
+export function isNodeResearchLocked(world: DemoWorld, node: SkillNode): boolean {
+  if (node.researchRequired === undefined) return false;
+  const research = RESEARCH_NODES_BY_ID.get(node.researchRequired);
+  return research === undefined || !isResearched(world, research);
+}
+
+// Shared purchasability guard (the non-cost half): research gate, branch exclusivity, known island
+// level, prerequisites, ownership. buyNode and canBuyNode share it so their rules can't drift.
 function nodeUnlocked(world: DemoWorld, node: SkillNode, t: number): boolean {
-  if (node.researchGated) return false; // stub: locked until the research track lands
+  if (isNodeResearchLocked(world, node)) return false;
+  if (isNodeBranchLocked(world, node)) return false;
   if (world.purchasedNodes.includes(node.id)) return false;
   for (const prereq of node.prerequisites) {
     if (!world.purchasedNodes.includes(prereq)) return false;
@@ -762,15 +791,18 @@ export function canBuyNode(world: DemoWorld, nodeId: string, t: number): boolean
   return canAffordBuild(world.state, t, node.island, cost);
 }
 
-// Buy a skill node at sim time t: apply its extraction multiplier (core: atomic debit + effect)
-// and record it owned. Idempotent per node; returns false if it can't be bought yet (gated,
-// unaffordable, ...) — the UI disables the button until canBuyNode, this is the backstop.
+// Buy a skill node at sim time t: apply its branch effect (core: atomic debit + effect) and record
+// it owned — extraction/trunk scale the island's extraction multiplier, refinement its refinement
+// (converter-yield) multiplier. Idempotent per node; returns false if it can't be bought yet
+// (gated, unaffordable, ...) — the UI disables the button until canBuyNode, this is the backstop.
 export function buyNode(world: DemoWorld, nodeId: string, t: number): boolean {
   const node = SKILL_NODES.get(nodeId);
   const cost = SKILL_NODE_COSTS.get(nodeId);
   if (node === undefined || cost === undefined || !nodeUnlocked(world, node, t)) return false;
+  const applyEffect =
+    node.branch === "refinement" ? applyRefinementMultiplier : applyExtractionMultiplier;
   try {
-    applyExtractionMultiplier(world.state, t, cost, node.island, node.effectFactor);
+    applyEffect(world.state, t, cost, node.island, node.effectFactor);
   } catch (error) {
     if (error instanceof InsufficientStockError) return false; // retry once stock accrues
     throw error; // wiring/content bug — never mistake it for "can't afford yet"

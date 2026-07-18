@@ -3,6 +3,7 @@ import {
   forEachConverter,
   getConverter,
   setConverter,
+  type Converter,
 } from "./components/converter.ts";
 import {
   createDeposit,
@@ -352,7 +353,7 @@ function solveTransfers(state: SimState): {
       srcId: converter.srcId,
       dstId: converter.dstId,
       cap: converter.cap,
-      ratio: converter.ratio,
+      ratio: converterEffectiveRatio(state, converter),
       srcCap: converter.cap,
       dstCap: converter.cap,
       component: converter,
@@ -671,6 +672,13 @@ export function islandExtractionMultiplier(state: SimState, island: IslandId): n
   return state.islandProgress.get(island)?.extractionMultiplier ?? 1;
 }
 
+// The refinement multiplier of the island a converter produces INTO, or 1 when that island has
+// no XP tree (unregistered, e.g. the global knowledge scope). Reads the stored value, no
+// allocation.
+export function islandRefinementMultiplier(state: SimState, island: IslandId): number {
+  return state.islandProgress.get(island)?.refinementMultiplier ?? 1;
+}
+
 // Island XP at t, closed form from the accumulator anchor. 0 for an unregistered island.
 // Between events xpRate is constant, so this is exact at any query time (ADR-0001 §1).
 export function islandXpAt(state: SimState, island: IslandId, t: number): number {
@@ -708,10 +716,21 @@ export function converterDraw(state: SimState, id: Id): number {
   return getConverter(state, id).flow;
 }
 
+// Destination units produced per source unit, INCLUDING the destination island's refinement
+// multiplier (the "refinement branch" skill lever). The content ratio is the base yield; the
+// island's node purchases scale it. The solver builds each converter edge with this value, so
+// the whole transfer solve (dst inflow, water-fill, feed) and converterFeed agree on one yield.
+function converterEffectiveRatio(state: SimState, converter: Converter): number {
+  return (
+    converter.ratio *
+    islandRefinementMultiplier(state, getWarehouse(state, converter.dstId).islandId)
+  );
+}
+
 // Realized converter production into its destination, in destination (B) units.
 export function converterFeed(state: SimState, id: Id): number {
   const converter = getConverter(state, id);
-  return converter.flow * converter.ratio;
+  return converter.flow * converterEffectiveRatio(state, converter);
 }
 
 // Commands (ADR-0001 implementation notes): validate -> advance to the command time ->
@@ -1152,6 +1171,28 @@ export function applyExtractionMultiplier(
   const progress = getIslandProgress(state, island); // loud throw if the island has no XP tree
   debitCost(state, t, island, cost);
   progress.extractionMultiplier *= factor;
+  deriveAll(state);
+}
+
+// Skill-node purchase (refinement branch): pay `cost` from the island then scale its refinement
+// multiplier by `factor`, atomically. The multiplier lifts the yield of every converter producing
+// into the island (converterEffectiveRatio), so more refined output per input without touching the
+// input draw. Same validate -> advance -> debit -> mutate -> deriveAll shape as
+// applyExtractionMultiplier; deriveAll re-solves transfers against the new yield.
+export function applyRefinementMultiplier(
+  state: SimState,
+  t: number,
+  cost: ReadonlyMap<ResourceType, number>,
+  island: IslandId,
+  factor: number,
+): void {
+  if (!Number.isFinite(factor) || !(factor > 0)) {
+    throw new Error(`refinement multiplier factor must be finite and > 0, got ${factor}`);
+  }
+  advance(state, t);
+  const progress = getIslandProgress(state, island); // loud throw if the island has no XP tree
+  debitCost(state, t, island, cost);
+  progress.refinementMultiplier *= factor;
   deriveAll(state);
 }
 

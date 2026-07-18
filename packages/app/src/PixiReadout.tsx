@@ -39,6 +39,8 @@ import {
   islandLevel,
   islandLevelCeilXp,
   islandLevelFloorXp,
+  isNodeBranchLocked,
+  isNodeResearchLocked,
   isResearchActive,
   isResearched,
   nextStorageTier,
@@ -528,38 +530,42 @@ export function PixiReadout(): React.JSX.Element {
       }
 
       // Skill-node buttons (DESIGN.md: island specialization). Like the build buttons but gated on
-      // island level + prerequisites (canBuyNode), not just affordability. A research-gated
-      // junction node is a static locked button — it never becomes buyable this pass, so it takes
-      // no per-frame update.
+      // island level + prerequisites (canBuyNode), not just affordability. Junction nodes can flip
+      // between locked and buyable within a session (research completing, the opposite branch being
+      // chosen), so every node takes a per-frame update — the label carries the current lock reason.
       for (const node of worldSkillNodes(world)) {
         const el = document.createElement("button");
         el.type = "button";
         const costText = formatCost(node.cost);
-        if (node.researchGated === true) {
-          el.textContent = `🔒 ${node.label} · Lvl ${node.levelRequired} — research required`;
-          el.disabled = true;
-          controls.appendChild(el);
-          continue;
-        }
+        const otherBranch = node.branch === "extraction" ? "Refinement" : "Extraction";
         el.addEventListener("click", () => {
           if (buyNode(world, node.id, epochAtStart + clock.now())) requestSave?.();
         });
         controls.appendChild(el);
-        let lastOwned: boolean | null = null;
-        let lastEnabled: boolean | null = null;
+        let lastLabel: string | null = null;
+        let lastDisabled: boolean | null = null;
         buttons.push({
           update: (t): void => {
             const owned = world.purchasedNodes.includes(node.id);
-            const enabled = canBuyNode(world, node.id, t);
-            if (owned !== lastOwned) {
-              lastOwned = owned;
-              el.textContent = owned
-                ? `${node.label} — owned`
-                : `Skill: ${node.label} · Lvl ${node.levelRequired} (${costText})`;
+            const enabled = !owned && canBuyNode(world, node.id, t);
+            let label: string;
+            if (owned) {
+              label = `${node.label} — owned`;
+            } else if (isNodeBranchLocked(world, node)) {
+              label = `🔒 ${node.label} — ${otherBranch} branch chosen`;
+            } else if (isNodeResearchLocked(world, node)) {
+              label = `🔒 ${node.label} · Lvl ${node.levelRequired} — research required`;
+            } else {
+              label = `Skill: ${node.label} · Lvl ${node.levelRequired} (${costText})`;
             }
-            if (enabled !== lastEnabled) {
-              lastEnabled = enabled;
-              el.disabled = !enabled;
+            if (label !== lastLabel) {
+              lastLabel = label;
+              el.textContent = label;
+            }
+            const disabled = !enabled;
+            if (disabled !== lastDisabled) {
+              lastDisabled = disabled;
+              el.disabled = disabled;
             }
           },
         });

@@ -9,6 +9,8 @@ import {
   grantResource,
   islandExtractionMultiplier,
   islandId,
+  islandRefinementMultiplier,
+  researchNodeId,
   resourceType,
   type ResourceType,
   serializeState,
@@ -28,6 +30,7 @@ import {
   isConverterBuilt,
   isExtractorBuilt,
   islandXpView,
+  isNodeBranchLocked,
   isResearchActive,
   isResearched,
   nextStorageTier,
@@ -40,6 +43,7 @@ import {
   upgradeStorage,
   WORLD_CONTENT_VERSION,
   worldIslands,
+  worldSkillNodes,
 } from "./world.ts";
 
 // The demo world's deposits are ordered [Wood A, Wood B, Stone A, Stone B]; name them (and
@@ -596,32 +600,70 @@ describe("island skill tree", () => {
     expect(islandExtractionMultiplier(restored.state, HOME)).toBeCloseTo(1.15, 9);
   });
 
-  it("keeps research-gated junction nodes locked even with the trunk owned, XP maxed, stock full", () => {
+  // A world with the whole trunk owned, XP maxed and stock topped up, so the ONLY thing gating the
+  // junction is the research + exclusivity rules. Junction nodes are level 5, prereq quarry-discipline.
+  function junctionReady(): { world: DemoWorld; top: () => void } {
     const world = createDemoWorld(1, 0);
     const { woodA, stoneA } = namedDeposits(world);
     expect(buildExtractor(world, woodA.id, 0)).toBe(true);
     expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
-    // Force max level so only cost/prereq/research can gate.
-    grantIslandXp(world.state, 0, HOME, 1000);
-
-    // Buy the whole trunk, topping stock before each so cost never blocks.
+    grantIslandXp(world.state, 0, HOME, 1000); // force max level
+    const top = (): void => {
+      grantResource(world.state, 0, woodA.warehouseId, 100);
+      grantResource(world.state, 0, stoneA.warehouseId, 100);
+    };
     for (const trunkId of [
       "home-efficient-tools",
       "home-sharper-edges",
       "home-quarry-discipline",
     ]) {
-      grantResource(world.state, 0, woodA.warehouseId, 100);
-      grantResource(world.state, 0, stoneA.warehouseId, 100);
+      top();
       expect(buyNode(world, trunkId, 0)).toBe(true);
     }
-    // Prerequisite (quarry-discipline) owned, XP maxed, stock full: the ONLY remaining blocker on
-    // the junction is the research-gate stub.
-    grantResource(world.state, 0, woodA.warehouseId, 100);
-    grantResource(world.state, 0, stoneA.warehouseId, 100);
+    top();
+    return { world, top };
+  }
+
+  const markResearched = (world: DemoWorld, id: string, cost: number): void => {
+    world.researchProgress.set(researchNodeId(id), cost);
+  };
+
+  it("keeps the junction locked until its research completes, then unlocks it", () => {
+    const { world } = junctionReady();
+    // Trunk owned, XP maxed, stock full: the only remaining blocker is the (incomplete) research.
     for (const junctionId of ["home-extraction-mastery", "home-refinement-mastery"]) {
       expect(canBuyNode(world, junctionId, 0)).toBe(false);
       expect(buyNode(world, junctionId, 0)).toBe(false);
     }
+    // Complete the gating research (Tidal Almanac): the junction becomes buyable.
+    markResearched(world, "tidal-almanac", 100);
+    expect(canBuyNode(world, "home-extraction-mastery", 0)).toBe(true);
+    expect(canBuyNode(world, "home-refinement-mastery", 0)).toBe(true);
+  });
+
+  it("makes the junction exclusive — picking one branch locks the other for good", () => {
+    const { world } = junctionReady();
+    markResearched(world, "tidal-almanac", 100);
+    // Commit to Extraction: its multiplier lifts, and the Refinement branch locks out.
+    expect(buyNode(world, "home-extraction-mastery", 0)).toBe(true);
+    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(1.15 * 1.15 * 1.2 * 1.3, 9);
+    const refinement = worldSkillNodes(world).find((n) => n.id === "home-refinement-mastery");
+    if (!refinement) throw new Error("no refinement node");
+    expect(isNodeBranchLocked(world, refinement)).toBe(true);
+    expect(canBuyNode(world, "home-refinement-mastery", 0)).toBe(false);
+    expect(buyNode(world, "home-refinement-mastery", 0)).toBe(false);
+  });
+
+  it("drives the refinement branch through the refinement multiplier, not extraction", () => {
+    const { world } = junctionReady();
+    markResearched(world, "tidal-almanac", 100);
+    const extractionBefore = islandExtractionMultiplier(world.state, HOME);
+    expect(buyNode(world, "home-refinement-mastery", 0)).toBe(true);
+    // The refinement node lifts the refinement multiplier (converter yield) and leaves extraction alone.
+    expect(islandRefinementMultiplier(world.state, HOME)).toBeCloseTo(1.1, 9);
+    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(extractionBefore, 9);
+    // ...and now Extraction is the locked-out branch.
+    expect(canBuyNode(world, "home-extraction-mastery", 0)).toBe(false);
   });
 
   it("registers HOME's XP on a pre-skill-tree (v3) save at the restore epoch, no retroactive XP", () => {

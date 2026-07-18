@@ -212,10 +212,20 @@ isGlobalScope`) that every island-enumerating feature must filter through. Added
   nodes are envelope bookkeeping (`purchasedNodes`); the mechanical effect lives in
   core state, so a save round-trip and offline catch-up preserve it. Added as a
   content-version step (registers `home`'s XP at the restore epoch — no retroactive
-  XP). The **exclusive junction** into Extraction/Refinement is defined structurally
-  but its gate is a **stub (`researchGated`, always locked)** until the research track
-  lands — gating stays one-way research→island; branch exclusivity + the real research
-  gate are wired then.
+  XP).
+- **Shipped (vertical slice):** the **exclusive junction** into Extraction/Refinement.
+  A junction node is gated on a **completed research node** (`world.ts: SkillNode.
+researchRequired`, both home masters gate on _Tidal Almanac_) AND on **branch
+  exclusivity** — buying into one branch locks the other for good (`nodeUnlocked`,
+  `isNodeBranchLocked`). Gating stays one-way research→island. A node's **branch also
+  selects its effect**: trunk/extraction scale the island's extraction multiplier,
+  refinement scales a new **refinement multiplier** — an `IslandProgress` field lifting
+  the **yield** of every converter producing into the island
+  (`sim.ts: applyRefinementMultiplier`, `converterEffectiveRatio`; the solver builds each
+  converter edge at the boosted ratio, so dst inflow, water-fill, and `converterFeed`
+  agree — more refined output per input, source draw unchanged). Serialized on
+  `IslandProgress` (SAVE_VERSION 6, v5→v6 backfills identity), so it survives round-trip
+  and offline catch-up like the extraction multiplier.
 
 All tree content is app-authored data over generic core primitives (timed-unlock
 queue, XP accumulator, gate predicates) — reconfigurable via content edits +
