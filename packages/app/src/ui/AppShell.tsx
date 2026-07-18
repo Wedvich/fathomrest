@@ -1,8 +1,9 @@
-import { getWarehouse, warehouseAmountAt } from "@fathomrest/core";
+import { getWarehouse, warehouseAmountAt, type IslandId } from "@fathomrest/core";
 import { useEffect, useState } from "react";
 
 import { resetSave } from "../persistence.ts";
 import { PixiReadout } from "../PixiReadout.tsx";
+import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
 import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
 import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens.ts";
@@ -25,6 +26,7 @@ const OVERLAYS: Record<
 
 const hudStyle: React.CSSProperties = {
   display: "flex",
+  flex: "none",
   alignItems: "center",
   gap: 12,
   height: 52,
@@ -91,6 +93,11 @@ const knowledgeIconStyle: React.CSSProperties = {
 async function handleReset(): Promise<void> {
   await resetSave();
   location.reload();
+}
+
+// Placeholder display name: island ids are lowercase slugs ("home") until islands carry names.
+function islandTitle(island: IslandId): string {
+  return island.charAt(0).toUpperCase() + island.slice(1);
 }
 
 // Global Knowledge pill (violet + round icon per hard rule 1) — the first React
@@ -174,6 +181,9 @@ function OverlayScaffold({
 
 export function AppShell(): React.JSX.Element {
   const session = useSimSession();
+  // Selected island is UI-local state (design handoff). Until the map/island view lands there
+  // is nothing to select with, so it derives to the world's first island.
+  const selectedIsland = session === null ? undefined : worldIslands(session.world)[0];
   const [overlay, setOverlay] = useState<OverlayKind | null>(null);
 
   useEffect(() => {
@@ -186,10 +196,19 @@ export function AppShell(): React.JSX.Element {
   }, [overlay]);
 
   return (
-    <div style={{ minHeight: "100vh", background: ocean.deepWater, fontFamily: bodyFont }}>
+    <div
+      style={{
+        height: "100dvh",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        background: ocean.deepWater,
+        fontFamily: bodyFont,
+      }}
+    >
       <header style={hudStyle}>
         <span style={crestStyle} aria-hidden="true" />
-        <h1 style={titleStyle}>Fathomrest</h1>
+        {selectedIsland !== undefined && <h1 style={titleStyle}>{islandTitle(selectedIsland)}</h1>}
         <span style={{ flex: 1 }} />
         <KnowledgePill />
         <button
@@ -225,7 +244,10 @@ export function AppShell(): React.JSX.Element {
           Reset
         </button>
       </header>
-      <main style={{ padding: 24 }}>
+      {/* The page never scrolls (it's a game, not a document): the shell is a fixed 100dvh
+          column and overflow stays inside <main>. The temp Pixi readout is taller than the
+          viewport, so <main> scrolls internally until the real canvas region replaces it. */}
+      <main style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
         {session === null ? (
           <p style={{ color: ocean.foam }}>Loading…</p>
         ) : (
