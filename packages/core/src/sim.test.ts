@@ -6,6 +6,7 @@ import { resourceType } from "./resource.ts";
 import { serializeState, type SaveDocument } from "./serialize.ts";
 import {
   addConverter,
+  applyExtractionMultiplier,
   addDeposit,
   addExtractor,
   addRoute,
@@ -19,11 +20,15 @@ import {
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
+  grantIslandXp,
   grantResource,
+  islandExtractionMultiplier,
+  islandXpAt,
   InsufficientStockError,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
+  registerIsland,
   upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,
@@ -833,5 +838,71 @@ describe("determinism", () => {
     const single = runRouteScenario(1);
     expect(runRouteScenario(10_000)).toStrictEqual(single);
     expect(runRouteScenario(3_333)).toStrictEqual(single);
+  });
+});
+
+describe("island XP", () => {
+  // Minimal island: one pool, a pure-floor (multiplier 1) producer, and a registered island so
+  // throughput accrues XP. Extractor rate 2 => 2 XP/s while the pool tracks.
+  const islandUnderExtraction = (
+    poolCap: number,
+  ): { state: SimState; ext: ReturnType<typeof addExtractor> } => {
+    const state = createSimState(1, 0);
+    const wh = addWarehouse(state, 0, R, I, poolCap);
+    const dep = addDeposit(state, 0, R, [], 1);
+    registerIsland(state, 0, I);
+    const ext = addExtractor(state, 0, 2, dep, wh);
+    return { state, ext };
+  };
+
+  it("accrues XP from realized throughput and pauses when the pool jams", () => {
+    const { state } = islandUnderExtraction(100);
+    // 2 XP/s while tracking; the query is exact ahead of the next event (fill at t=50).
+    expect(islandXpAt(state, I, 10)).toBeCloseTo(20, 9);
+    // The pool fills at 2/s and jams at t=50 with no sink; throttled producers => 0 throughput,
+    // so XP freezes at 2*50 = 100 no matter how far past the jam we advance.
+    advance(state, 500);
+    expect(islandXpAt(state, I, 500)).toBeCloseTo(100, 9);
+  });
+
+  it("an extraction-multiplier node scales both throughput and the XP rate", () => {
+    const { state, ext } = islandUnderExtraction(1_000_000); // large cap: never jams in-window
+    expect(extractorEffectiveRate(state, ext)).toBeCloseTo(2, 9);
+    // XP integrates 2/s to t=10 (=20), then a cost-free 1.5x node lifts the rate to 3/s.
+    applyExtractionMultiplier(state, 10, new Map(), I, 1.5);
+    expect(islandExtractionMultiplier(state, I)).toBeCloseTo(1.5, 9);
+    expect(extractorEffectiveRate(state, ext)).toBeCloseTo(3, 9);
+    advance(state, 20);
+    expect(islandXpAt(state, I, 20)).toBeCloseTo(50, 9); // 20 + 3*10
+  });
+
+  it("grantIslandXp adds a lump on top of ongoing rate accrual", () => {
+    const { state } = islandUnderExtraction(1_000_000);
+    // At t=10 XP is 20 from the 2/s rate; a milestone/expedition lump adds 100 on top.
+    grantIslandXp(state, 10, I, 100);
+    expect(islandXpAt(state, I, 10)).toBeCloseTo(120, 9);
+    // The rate is undisturbed by the lump: +2*5 more by t=15.
+    advance(state, 15);
+    expect(islandXpAt(state, I, 15)).toBeCloseTo(130, 9);
+  });
+
+  it("accrues XP identically in one jump or many (offline == online, jam honored in both)", () => {
+    const oneJump = islandUnderExtraction(100).state;
+    advance(oneJump, 500);
+    const stepped = islandUnderExtraction(100).state;
+    for (let t = 10; t <= 500; t += 10) advance(stepped, t);
+    // Both cross the jam at t=50; XP lands on the same capped value.
+    expect(islandXpAt(stepped, I, 500)).toBeCloseTo(islandXpAt(oneJump, I, 500), 9);
+    expect(islandXpAt(oneJump, I, 500)).toBeCloseTo(100, 9);
+  });
+
+  it("leaves unregistered islands with no XP and a unit multiplier", () => {
+    const state = createSimState(1, 0);
+    const wh = addWarehouse(state, 0, R, I, 1_000_000);
+    const dep = addDeposit(state, 0, R, [], 1);
+    addExtractor(state, 0, 2, dep, wh); // island I is never registered
+    advance(state, 50);
+    expect(islandXpAt(state, I, 50)).toBe(0);
+    expect(islandExtractionMultiplier(state, I)).toBe(1);
   });
 });

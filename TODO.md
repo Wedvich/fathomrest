@@ -6,80 +6,65 @@ pick up next".
 
 ## Done this session
 
-**Research track, part 1 — knowledge (the first global-scoped resource).** Shipped the
-extraction half of DESIGN.md "Progression/Knowledge": a global knowledge pool fed by a
-cost-gated observatory on the demo island.
+**Island skill tree, part 1 — Island XP + the shared trunk (junction stubbed).** Shipped the
+first per-island progression loop from DESIGN.md "Island specialization": extract → gain XP →
+level → buy a throughput node. The research-gated exclusive junction is defined but stubbed
+locked (research doesn't exist yet — the user chose "trunk + XP, stub junction").
 
-- **Core:** `buildExtractor` now takes an explicit **build-site island** (`buildIslandId`)
-  instead of inferring the cost island from the output warehouse. This decouples where the
-  cost is paid from where the output lands — needed because the observatory sits on (and is
-  paid from) `home` while filling the `global` pool. Same-island builds are unchanged
-  (callers pass the pool's island). New core test pins the decoupling; the 6 existing
-  `buildExtractor` call sites updated.
-- **App (`world.ts`):** `KNOWLEDGE` resource, a `GLOBAL` scope tag, `KNOWLEDGE_CAP` (100,
-  placeholder), and `addKnowledgeTier` (global pool on `GLOBAL` + observatory deposit on
-  `home`, cost 40 wood + 40 stone above the seed like the iron tier). Wired into
-  `createDemoWorld` and as a **v2→v3 content-upgrade step** (WORLD_CONTENT_VERSION now 3),
-  so existing saves gain knowledge at the restore epoch without retroactive production. App
-  `Deposit` view model carries `payIslandId` (the funding/site island). `worldIslands`
-  excludes `GLOBAL` so the global pool's cap stays **off the wood/stone storage ladder**
-  (it's research-gated later).
-- **UI (`PixiReadout.tsx`):** build buttons now key off an explicit `payIslandId` (not a
-  paying-warehouse). Knowledge pool bar + observatory build button appear automatically.
-- **Tests:** new `knowledge tier` scenario in `world.test.ts` (global scope + off-ladder,
-  observatory gated behind the base economy then accrues into the global pool + jams at cap,
-  content-upgrade injection). Storage/label tests updated for the extra pool.
+- **Core (new `IslandProgress` primitive, SAVE_VERSION 3→4):** `components/island-progress.ts`
+  holds a per-island `{ xpAnchor, xpAnchorTime, xpRate, extractionMultiplier }`, keyed
+  `Map<IslandId, IslandProgress>` on `SimState`. XP is an **analytic accumulator, event-free**:
+  `deriveAll` gains a phase 5 that re-anchors XP and caches `xpRate = islandThroughput` (Σ
+  `extractorEffectiveRate` into the island's pools + Σ `converterFeed` landing there — realized
+  rates, so a jam pauses XP; route inflow excluded). No cap, no crossing → it schedules nothing;
+  `islandXpAt(t)` is exact between events and runs offline at full fidelity. New commands:
+  `registerIsland` (opt-in; `GLOBAL` knowledge never registered), `applyExtractionMultiplier`
+  (atomic `debitCost` + multiplier, loud throw if the island's unregistered), `grantIslandXp`
+  (discrete lump — the expedition/milestone hook, mirrors `grantResource`). The multiplier is
+  applied in **both** `extractorEffectiveRate` and `totalInflow` (kept identical) so fill and
+  depletion never diverge. serialize v3→v4 backfills `islandProgress: []`; validation mirrors the
+  command boundary. New exports in `index.ts`.
+- **App (`world.ts`, WORLD_CONTENT_VERSION 3→4):** `SkillNode` content + `HOME_SKILL_TREE` (3
+  trunk nodes: level+cost+prereq gated, extraction-multiplier effect; 2 junction nodes flagged
+  `researchGated`). `XP_LEVEL_THRESHOLDS` + `islandLevel`; `islandXpView`, `worldSkillNodes`,
+  `canBuyNode`, `buyNode`. `DemoWorld.purchasedNodes` is envelope bookkeeping (reassigned, never
+  mutated); the mechanical effect lives in core state, so both come straight from the save and
+  can't drift. `createDemoWorld` registers `home`; a new v3→v4 upgrade step registers it on old
+  saves at the restore epoch (no retroactive XP). `restoreWorld` drops unknown node ids (safe for
+  a newer-app save on a stale bundle — the effect is already in core state).
+- **UI (`PixiReadout.tsx`):** an XP bar per registered island (level + progress-to-next), and
+  skill-node buttons (gated on `canBuyNode`, not just affordability); a `researchGated` node
+  renders a static "🔒 … research required" disabled button.
+- **Tests:** core `island XP` scenario (throughput accrual, jam-pause, multiplier scales rate,
+  lump grant, offline==online, unregistered island = 0/×1) + serialize round-trip/migration/reject;
+  app `island skill tree` scenario (level+cost gating, buy applies multiplier + persists, junction
+  stays locked with trunk owned + XP maxed + stock full, v3→v4 injection with no retroactive XP).
+  Fixed the pre-existing `knowledge tier` content-upgrade test (its `WORLD_CONTENT_VERSION - 1`
+  shorthand + `createDemoWorld`-derived fixture broke when a step was added): pinned to a faithful
+  iron-era v2 doc (`islandProgress: []`, version 2).
 
-**Adversarial review of the knowledge changes + the four load-bearing findings fixed** (8
-finder angles → 10 verified findings; the remaining six are test/drive-script nits that can
-ride along later):
-
-- **Loud wiring error:** core `debitCost` now throws a plain `Error` (never the benign,
-  catch-and-retried `InsufficientStockError`) when the build island has **no pool at all**
-  for a cost resource — a miswired `payIslandId` fails loud instead of presenting as a
-  forever-disabled build button (silent soft-lock). Pinned by a core test.
-- **Restore boundary:** `restoreWorld` validates each deposit's persisted `payIslandId`
-  against the doc's islands — corruption quarantines loudly, same as dangling ids.
-- **`payIslandId` required at runtime:** backfilled once in `restoreWorld` (new
-  `SavedDeposit` keeps the field optional for pre-knowledge saves); the duplicated
-  `?? getWarehouse(...).islandId` fallbacks in `world.ts` and `PixiReadout.tsx` are gone.
-- **`isGlobalScope` predicate (exported):** the GLOBAL exclusion is a shared predicate, no
-  longer an inline string-compare in `worldIslands` — island XP and any future
-  island-enumerating feature must filter through it, not re-derive the exclusion.
-
-`typecheck | lint | format | test` green (113 tests). **Live-driven (browser-drive skill,
-headless Chromium):** observatory disabled at the 30/30 seed, enabled once the base economy
-funds 40/40, one click built it (button flipped to "extractor built"), then the storage rung
-still bought after re-accrual — proving the observatory is paid from home, not the global
-pool it fills. Knowledge bar renders (0/100 fresh, 47/100 accrued on reopen), no "global
-storage" button, IDB reopen clean, zero console errors. `drive.mjs` extended to cover the
-observatory; screenshots in the gitignored `packages/app/drive-output/`.
-
-Note: `package.json` gained a `dev` script (was already in the working tree at session
-start, not from this work) — fine to keep, just not part of the knowledge change.
+`typecheck | lint | format | test` green (**124 tests**). **Live-driven (browser-drive skill,
+headless Chromium):** after the base economy + observatory + storage rung, the purple **home XP**
+bar renders and climbs (drove to "Lvl 4 · 220/260 XP"); "Efficient Tools" was disabled at low
+XP, enabled after leveling + re-accruing 40/40, one click flipped it to "— owned"; both
+"🔒 … research required" junction buttons stayed locked; the owned node + 250 caps survived an
+IndexedDB reopen; zero console errors. `drive.mjs` extended to cover the skill tree; screenshots
+in the gitignored `packages/app/drive-output/`.
 
 ## Next session
 
-1. **Research drain (part 2 of the research track).** With knowledge now produced, build
-   active research per the **redesigned** DESIGN.md "Research (global)" (2026-07-18 —
-   supersedes the old upfront-cost/queue-depth-2 plan): a Factorio-style **continuous
-   drain** at a global base rate (duration = cost ÷ rate; empty pool stalls, never fails),
-   full-fidelity offline via the converter math, per-node **absolute consumed** progress
-   preserved across free cancel/swap. **Queue depth starts at 0** (active slot only; depth
-   is itself research-unlocked later — research/meta category), so part 2 needs no queue
-   machinery beyond the single active slot. This is the first thing that _spends_
-   knowledge and turns the "jam at cap" into the "come spend me" prompt.
-2. **Thin unlock tree (part 3).** A few research nodes across the unlock categories
-   (buildings, in-place building upgrades, economy modifiers, island-tree gates). First
-   concrete payoff: **research-gate the storage upgrade** (it shipped cost-gated only —
-   DESIGN.md unlock category "in-place building upgrades"). Include a **research/meta**
-   node raising queue depth 0→1 — the queue machinery lands here, as an unlock.
-3. Then the two-track's second track: **Island XP + skill tree** (throughput-fed XP,
-   trunk + Extraction/Refinement branches, junction research-gated).
+1. **Research drain (part 2).** Still the gating dependency for the skill-tree junction. Per
+   DESIGN.md "Research (global)": Factorio-style continuous knowledge drain, per-node absolute
+   consumed, queue depth 0. First thing that _spends_ knowledge.
+2. **Thin unlock tree (part 3).** A few research nodes across the unlock categories; research-gate
+   the storage upgrade; a research/meta node raising queue depth 0→1 (queue machinery lands here).
+3. **Wire the skill-tree junction to research.** Replace the `researchGated` stub with a real
+   research-node gate and add **branch exclusivity** (picking Extraction locks Refinement, and
+   vice versa) — the `TODO` markers are in `world.ts` (`HOME_SKILL_TREE` / `nodeUnlocked`) and
+   `PixiReadout.tsx` (the locked-button branch). Add the Refinement-branch node effects then too.
 
-Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) — the
-mechanism for networking island pools, and what makes multiple islands' observatories all
-feed the one global knowledge pool. Pick up once single-island depth is proven.
+Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) — networks
+island pools; also what lets multiple islands' observatories feed the one global knowledge pool.
 
 Carried over: the PWA service worker pins old bundles until the update prompt is accepted —
 rebuild `packages/app/dist/` before serving it anywhere.

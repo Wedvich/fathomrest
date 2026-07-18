@@ -1,6 +1,8 @@
 import type { Converter } from "./components/converter.ts";
 import type { Deposit } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
+import type { IslandProgress } from "./components/island-progress.ts";
+import type { IslandId } from "./island.ts";
 import type { Route } from "./components/route.ts";
 import type { Warehouse } from "./components/warehouse.ts";
 import { createEventQueue, type EventQueue } from "./events.ts";
@@ -25,6 +27,7 @@ export interface SimState {
   deposits: Map<Id, Deposit>;
   routes: Map<Id, Route>;
   converters: Map<Id, Converter>;
+  islandProgress: Map<IslandId, IslandProgress>;
 }
 
 export function createSimState(seed: number, wallTimeMs: number): SimState {
@@ -39,6 +42,7 @@ export function createSimState(seed: number, wallTimeMs: number): SimState {
     deposits: new Map(),
     routes: new Map(),
     converters: new Map(),
+    islandProgress: new Map(),
   };
 }
 

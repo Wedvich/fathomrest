@@ -32,6 +32,13 @@ export {
   getExtractor,
   type Extractor,
 } from "./components/extractor.ts";
+export {
+  forEachIslandProgress,
+  getIslandProgress,
+  islandProgressIds,
+  isIslandRegistered,
+  type IslandProgress,
+} from "./components/island-progress.ts";
 export { forEachRoute, getRoute, routeIds, type Route } from "./components/route.ts";
 export {
   forEachWarehouse,
@@ -42,6 +49,7 @@ export {
 } from "./components/warehouse.ts";
 export {
   addConverter,
+  applyExtractionMultiplier,
   addDeposit,
   addExtractor,
   addRoute,
@@ -55,11 +63,15 @@ export {
   depositMultiplier,
   depositRemainingAt,
   extractorEffectiveRate,
+  grantIslandXp,
   grantResource,
   InsufficientStockError,
+  islandExtractionMultiplier,
+  islandXpAt,
   routeFlow,
   setRouteCap,
   setWarehousePullRate,
+  registerIsland,
   upgradeIslandCapacity,
   warehouseAmountAt,
   warehouseOutflowRate,

@@ -2,6 +2,8 @@ import {
   addDeposit,
   addWarehouse,
   advance,
+  applyExtractionMultiplier,
+  canAffordBuild,
   buildConverter as buildConverterCmd,
   buildExtractor as buildExtractorCmd,
   createSimState,
@@ -12,6 +14,9 @@ import {
   getDeposit,
   getWarehouse,
   grantResource,
+  islandXpAt,
+  isIslandRegistered,
+  registerIsland,
   InsufficientStockError,
   offlineElapsedSeconds,
   islandId,
@@ -40,6 +45,12 @@ export interface DemoWorld {
   // service-worker-pinned bundle can't downgrade a newer save's version and trick it into
   // re-running the newer app's steps.
   contentVersion: number;
+  // Skill nodes bought on this world (DESIGN.md: island specialization). App-side bookkeeping
+  // for UI + prereq/exclusivity gating; the mechanical effect (the island extraction
+  // multiplier) lives in core state. Only buyNode writes it, so the two never drift. The
+  // property is reassigned (never mutated in place) on each purchase, keeping it immutable-by
+  // -value like the other envelope arrays.
+  purchasedNodes: readonly string[];
 }
 
 // A deposit and everything the app needs to offer it as a build site: the core deposit id,
@@ -101,6 +112,9 @@ export interface SavedWorld {
   // (treated as 1). Bumped whenever a WORLD_UPGRADES step is added, so restoreWorld can
   // raise older saves to current.
   contentVersion?: number;
+  // Absent on a pre-skill-tree (contentVersion < 4) save; restoreWorld defaults it to [] before
+  // the upgrade step registers the island's XP.
+  purchasedNodes?: readonly string[];
 }
 
 const EXTRACTOR_RATE = 1; // units/s an extractor produces once built
@@ -142,6 +156,137 @@ const OBSERVATORY_COST = 40;
 export function isGlobalScope(island: IslandId): boolean {
   return island === GLOBAL;
 }
+
+// ── Island skill tree (DESIGN.md: island specialization) ──────────────────────────────────
+// App-authored node content over the core IslandProgress primitive (throughput-fed XP
+// accumulator + extraction multiplier). Shipped this pass: the XP accumulator and a shared
+// TRUNK of instant, level- and cost-gated nodes whose effect is an island extraction
+// multiplier ("nodes are the multiplier", DESIGN.md). The exclusive junction into
+// Extraction/Refinement branches is defined structurally but research-gated — and the research
+// track doesn't exist yet, so those nodes are stubbed LOCKED (researchGated). TODO: when
+// research lands, gate the junction on a real research node and enforce branch exclusivity
+// (picking one branch locks the other); gating stays one-way research -> island.
+export interface SkillNode {
+  readonly id: string;
+  readonly island: IslandId;
+  readonly branch: "trunk" | "extraction" | "refinement";
+  readonly label: string;
+  // Minimum island level (from XP) before the node may be bought; stockpiles gate whether it's
+  // affordable now (DESIGN.md: levels gate WHEN, cost gates WHETHER).
+  readonly levelRequired: number;
+  readonly cost: readonly (readonly [ResourceType, number])[];
+  readonly prerequisites: readonly string[];
+  // Factor multiplied into the island's extraction multiplier on purchase.
+  readonly effectFactor: number;
+  // Junction nodes gate behind research that doesn't exist yet — stubbed locked until then.
+  readonly researchGated?: boolean;
+}
+
+// XP required to REACH each level (index 0 = level 1 at 0 XP). islandLevel counts thresholds at
+// or below the XP, so it returns 1..THRESHOLDS.length. Placeholder tuning (DESIGN.md slice).
+const XP_LEVEL_THRESHOLDS: readonly number[] = [0, 20, 60, 140, 260];
+
+export function islandLevel(xp: number): number {
+  let level = 0;
+  for (const threshold of XP_LEVEL_THRESHOLDS) {
+    if (xp < threshold) break;
+    level += 1;
+  }
+  return level;
+}
+
+// XP floor of `level` (the threshold at which it begins); 0 at level 1.
+export function islandLevelFloorXp(level: number): number {
+  return XP_LEVEL_THRESHOLDS[level - 1] ?? 0;
+}
+
+// XP at which `level` ends (the next level's threshold), or undefined at max level.
+export function islandLevelCeilXp(level: number): number | undefined {
+  return XP_LEVEL_THRESHOLDS[level];
+}
+
+// Node costs stay <= the base warehouse cap (100) so the trunk is buyable without a storage
+// upgrade, and above STARTING_STOCK (30) so the base economy must be running (DESIGN.md).
+const HOME_SKILL_TREE: readonly SkillNode[] = [
+  {
+    id: "home-efficient-tools",
+    island: HOME,
+    branch: "trunk",
+    label: "Efficient Tools",
+    levelRequired: 2,
+    cost: [
+      [WOOD, 40],
+      [STONE, 40],
+    ],
+    prerequisites: [],
+    effectFactor: 1.15,
+  },
+  {
+    id: "home-sharper-edges",
+    island: HOME,
+    branch: "trunk",
+    label: "Sharper Edges",
+    levelRequired: 3,
+    cost: [
+      [WOOD, 60],
+      [STONE, 60],
+    ],
+    prerequisites: ["home-efficient-tools"],
+    effectFactor: 1.15,
+  },
+  {
+    id: "home-quarry-discipline",
+    island: HOME,
+    branch: "trunk",
+    label: "Quarry Discipline",
+    levelRequired: 4,
+    cost: [
+      [WOOD, 80],
+      [STONE, 80],
+    ],
+    prerequisites: ["home-sharper-edges"],
+    effectFactor: 1.2,
+  },
+  {
+    id: "home-extraction-mastery",
+    island: HOME,
+    branch: "extraction",
+    label: "Extraction Mastery",
+    levelRequired: 5,
+    cost: [
+      [WOOD, 90],
+      [STONE, 90],
+    ],
+    prerequisites: ["home-quarry-discipline"],
+    effectFactor: 1.3,
+    researchGated: true,
+  },
+  {
+    id: "home-refinement-mastery",
+    island: HOME,
+    branch: "refinement",
+    label: "Refinement Mastery",
+    levelRequired: 5,
+    cost: [
+      [WOOD, 90],
+      [STONE, 90],
+    ],
+    prerequisites: ["home-quarry-discipline"],
+    effectFactor: 1.1,
+    researchGated: true,
+  },
+];
+
+const SKILL_NODES: ReadonlyMap<string, SkillNode> = new Map(
+  HOME_SKILL_TREE.map((node) => [node.id, node]),
+);
+
+// Per-node cost maps, prebuilt once. canBuyNode is polled every frame by the skill-node buttons,
+// so it must not allocate on the frame loop (perf doc) — it reads these instead of rebuilding a
+// Map from node.cost each call.
+const SKILL_NODE_COSTS: ReadonlyMap<string, ReadonlyMap<ResourceType, number>> = new Map(
+  HOME_SKILL_TREE.map((node) => [node.id, new Map(node.cost)]),
+);
 
 // One rung of the storage-upgrade ladder: raise a pool's capacity to `capacity` for `cost`.
 export interface StorageTier {
@@ -320,6 +465,10 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
   const iron = addIronTier(state, 0);
   const knowledge = addKnowledgeTier(state, 0);
 
+  // Register HOME's progression so it accrues XP and can carry skill nodes. GLOBAL (knowledge)
+  // is deliberately never registered — it stays outside every per-island system.
+  registerIsland(state, 0, HOME);
+
   return {
     state,
     warehouses: [
@@ -330,6 +479,7 @@ export function createDemoWorld(seed: number, wallTimeMs: number): DemoWorld {
     ],
     deposits: [woodA, woodB, stoneA, stoneB, ...iron.deposits, ...knowledge.deposits],
     converterSites: iron.converterSites,
+    purchasedNodes: [],
     contentVersion: WORLD_CONTENT_VERSION,
   };
 }
@@ -363,6 +513,16 @@ const WORLD_UPGRADES: readonly ((world: DemoWorld, t: number) => DemoWorld)[] = 
       deposits: [...world.deposits, ...knowledge.deposits],
     };
   },
+  // v3 -> v4: register HOME's island progression on a wood/stone+iron+knowledge save, so it
+  // starts accruing XP at the restore-time epoch (no retroactive XP across the offline gap).
+  // Adds no envelope view models — the skill tree is content-constant (HOME_SKILL_TREE).
+  (world, t): DemoWorld => {
+    // Idempotent: a v3 doc predates island XP, so it normally carries no HOME progression — but
+    // guard on the core state rather than assume, so a save whose envelope/doc versions ever
+    // drift can't make registerIsland throw "already registered" and brick the restore.
+    if (!isIslandRegistered(world.state, HOME)) registerIsland(world.state, t, HOME);
+    return world;
+  },
 ];
 export const WORLD_CONTENT_VERSION = WORLD_UPGRADES.length + 1;
 
@@ -372,6 +532,7 @@ export function snapshotWorld(world: DemoWorld): SavedWorld {
     warehouses: world.warehouses,
     deposits: world.deposits,
     converterSites: world.converterSites,
+    purchasedNodes: world.purchasedNodes,
     contentVersion: world.contentVersion,
   };
 }
@@ -494,6 +655,69 @@ export function upgradeStorage(world: DemoWorld, island: IslandId, t: number): b
   }
 }
 
+// The skill nodes offered for a world (its registered islands). All demo nodes sit on HOME.
+export function worldSkillNodes(world: DemoWorld): readonly SkillNode[] {
+  const islands = new Set(worldIslands(world));
+  return HOME_SKILL_TREE.filter((node) => islands.has(node.island));
+}
+
+// A view of an island's XP for the readout: current XP, level, and the [current, next) level
+// thresholds (nextLevelXp is undefined at max level).
+export interface IslandXpView {
+  readonly xp: number;
+  readonly level: number;
+  readonly currentLevelXp: number;
+  readonly nextLevelXp: number | undefined;
+}
+
+export function islandXpView(world: DemoWorld, island: IslandId, t: number): IslandXpView {
+  const xp = islandXpAt(world.state, island, t);
+  const level = islandLevel(xp);
+  return {
+    xp,
+    level,
+    currentLevelXp: islandLevelFloorXp(level),
+    nextLevelXp: islandLevelCeilXp(level),
+  };
+}
+
+// Shared purchasability guard (the non-cost half): known island level, prerequisites, ownership,
+// and the research-gate stub. buyNode and canBuyNode share it so their rules can't drift.
+function nodeUnlocked(world: DemoWorld, node: SkillNode, t: number): boolean {
+  if (node.researchGated) return false; // stub: locked until the research track lands
+  if (world.purchasedNodes.includes(node.id)) return false;
+  for (const prereq of node.prerequisites) {
+    if (!world.purchasedNodes.includes(prereq)) return false;
+  }
+  return islandLevel(islandXpAt(world.state, node.island, t)) >= node.levelRequired;
+}
+
+// Whether a node can be bought right now (unlocked + affordable). Mirrors buyNode's guard so a
+// button reporting "buyable" can't be refused, except a race the save-on-command absorbs.
+export function canBuyNode(world: DemoWorld, nodeId: string, t: number): boolean {
+  const node = SKILL_NODES.get(nodeId);
+  const cost = SKILL_NODE_COSTS.get(nodeId);
+  if (node === undefined || cost === undefined || !nodeUnlocked(world, node, t)) return false;
+  return canAffordBuild(world.state, t, node.island, cost);
+}
+
+// Buy a skill node at sim time t: apply its extraction multiplier (core: atomic debit + effect)
+// and record it owned. Idempotent per node; returns false if it can't be bought yet (gated,
+// unaffordable, ...) — the UI disables the button until canBuyNode, this is the backstop.
+export function buyNode(world: DemoWorld, nodeId: string, t: number): boolean {
+  const node = SKILL_NODES.get(nodeId);
+  const cost = SKILL_NODE_COSTS.get(nodeId);
+  if (node === undefined || cost === undefined || !nodeUnlocked(world, node, t)) return false;
+  try {
+    applyExtractionMultiplier(world.state, t, cost, node.island, node.effectFactor);
+  } catch (error) {
+    if (error instanceof InsufficientStockError) return false; // retry once stock accrues
+    throw error; // wiring/content bug — never mistake it for "can't afford yet"
+  }
+  world.purchasedNodes = [...world.purchasedNodes, nodeId];
+  return true;
+}
+
 // Rebuild a world from a save, folding the wall-clock gap since save into sim time
 // (offline catch-up, ADR-0001 §4). The saved (epoch, wallTime) pair stays a valid anchor
 // afterward — the next save re-stamps wallTime — so wallTime is left as-is here.
@@ -535,12 +759,25 @@ export function restoreWorld(saved: SavedWorld, nowMs: number): DemoWorld {
     getWarehouse(state, site.srcWarehouseId);
     getWarehouse(state, site.dstWarehouseId);
   }
+  // Restore owned skill nodes, filtered to nodes this build knows. Dropping an unknown id (a
+  // save from a newer app on a stale bundle) is safe and non-destructive: the mechanical effect
+  // lives in core state (islandProgress.extractionMultiplier), so the id list is only UI/gating
+  // bookkeeping. Failing loud here would quarantine an otherwise-valid newer save.
+  const rawNodes: readonly unknown[] = Array.isArray(saved.purchasedNodes)
+    ? saved.purchasedNodes
+    : [];
+  const purchasedNodes: string[] = [];
+  for (const nodeId of rawNodes) {
+    if (typeof nodeId === "string" && SKILL_NODES.has(nodeId)) purchasedNodes.push(nodeId);
+    else console.warn(`Dropping unknown skill node ${String(nodeId)} from restored save.`);
+  }
   advance(state, state.epoch + offlineElapsedSeconds(nowMs, state.wallTime));
   let world: DemoWorld = {
     state,
     warehouses: saved.warehouses,
     deposits,
     converterSites: saved.converterSites ?? [], // absent on a pre-iron-tier (v1) save
+    purchasedNodes,
     contentVersion: savedVersion,
   };
   // Content upgrades run after offline catch-up (design decision 3): new structures are

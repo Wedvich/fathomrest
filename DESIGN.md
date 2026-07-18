@@ -180,6 +180,25 @@ isGlobalScope`) that every island-enumerating feature must filter through. Added
   tier never resets the ladder or re-charges already-bought rungs. Until building **slots**
   exist, a "placeable storage building" and this island cap-raise are mechanically
   equivalent; the placeable/slot framing is reconciled when the slot pillar lands.
+- **Shipped (vertical slice):** the throughput-fed XP accumulator and the shared
+  **trunk** of nodes. XP is a core per-island `IslandProgress` accumulator
+  (`sim.ts: registerIsland`, `islandXpAt`) whose rate is the island's realized
+  production — Σ extractor effective-rate + Σ converter feed into the island's pools,
+  re-anchored each `deriveAll`, closed-form and event-free (no cap/crossing), so it
+  pauses at a jam and runs offline at full fidelity. It's an opt-in per island
+  (`GLOBAL` knowledge is never registered) and supports discrete lump grants
+  (`grantIslandXp`, the expedition/milestone hook) alongside rate accrual. Trunk nodes
+  are app-authored content (`world.ts: HOME_SKILL_TREE`), instant, level- (XP) and
+  cost-gated; their effect is an **island extraction multiplier**
+  (`applyExtractionMultiplier`, scaling every extractor on the island in
+  `extractorEffectiveRate` **and** `totalInflow` so fill and depletion agree). Owned
+  nodes are envelope bookkeeping (`purchasedNodes`); the mechanical effect lives in
+  core state, so a save round-trip and offline catch-up preserve it. Added as a
+  content-version step (registers `home`'s XP at the restore epoch — no retroactive
+  XP). The **exclusive junction** into Extraction/Refinement is defined structurally
+  but its gate is a **stub (`researchGated`, always locked)** until the research track
+  lands — gating stays one-way research→island; branch exclusivity + the real research
+  gate are wired then.
 
 All tree content is app-authored data over generic core primitives (timed-unlock
 queue, XP accumulator, gate predicates) — reconfigurable via content edits +

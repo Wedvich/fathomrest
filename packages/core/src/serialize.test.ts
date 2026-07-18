@@ -16,6 +16,7 @@ import {
 } from "./serialize.ts";
 import {
   addConverter,
+  applyExtractionMultiplier,
   addDeposit,
   addExtractor,
   addRoute,
@@ -25,6 +26,9 @@ import {
   converterFeed,
   routeFlow,
   setWarehousePullRate,
+  grantIslandXp,
+  islandXpAt,
+  registerIsland,
   warehouseAmountAt,
 } from "./sim.ts";
 import { createSimState, type SimState } from "./state.ts";
@@ -422,5 +426,48 @@ describe("serializer", () => {
     const version = serializeState(midFlightState().state).version;
     const doc = JSON.parse(`{"version":${version}}`) as SaveDocument;
     expect(() => deserializeState(doc)).toThrow(/invalid save document/);
+  });
+});
+
+describe("island progression serialization", () => {
+  const buildWithIsland = (): SimState => {
+    const state = createSimState(7, 0);
+    const wh = addWarehouse(state, 0, R, I, 1_000_000);
+    const dep = addDeposit(state, 0, R, [], 1);
+    registerIsland(state, 0, I);
+    addExtractor(state, 0, 2, dep, wh);
+    applyExtractionMultiplier(state, 5, new Map(), I, 1.5); // cost-free node effect
+    grantIslandXp(state, 8, I, 40);
+    advance(state, 30);
+    return state;
+  };
+
+  it("round-trips island XP and the extraction multiplier", () => {
+    const state = buildWithIsland();
+    const doc = serializeState(state);
+    const restored = deserializeState(doc);
+    // The accumulator restores to the same closed form, and the document reserializes identically.
+    expect(islandXpAt(restored, I, 30)).toBeCloseTo(islandXpAt(state, I, 30), 9);
+    expect(serializeState(restored)).toStrictEqual(doc);
+  });
+
+  it("migrates a v3 save by backfilling an empty island-progress table", () => {
+    // A pre-island-XP (v3) document: current shape minus islandProgress, older version.
+    const doc = serializeState(midFlightState().state);
+    const { islandProgress: _omit, ...rest } = doc;
+    const v3 = { ...rest, version: 3 } as SaveDocument;
+    const restored = deserializeState(v3);
+    // Loads without throwing; no islands registered, and the upgraded document reports current.
+    expect([...restored.islandProgress.keys()]).toHaveLength(0);
+    expect(serializeState(restored).version).toBe(serializeState(midFlightState().state).version);
+  });
+
+  it("rejects an island-progress entry with a negative multiplier", () => {
+    const doc = serializeState(buildWithIsland());
+    const islandProgress = doc.islandProgress.map(([island, p]): [typeof island, typeof p] => [
+      island,
+      { ...p, extractionMultiplier: -1 },
+    ]);
+    expect(() => deserializeState({ ...doc, islandProgress })).toThrow(/extractionMultiplier/);
   });
 });

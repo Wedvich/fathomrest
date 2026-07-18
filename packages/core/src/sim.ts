@@ -18,6 +18,12 @@ import {
   getExtractor,
   setExtractor,
 } from "./components/extractor.ts";
+import {
+  createIslandProgress,
+  forEachIslandProgress,
+  getIslandProgress,
+  setIslandProgress,
+} from "./components/island-progress.ts";
 import { createRoute, forEachRoute, getRoute, setRoute } from "./components/route.ts";
 import {
   createWarehouse,
@@ -100,6 +106,8 @@ function handleEvent(state: SimState, event: SimEvent): void {
 //   3. Schedule crossings: with transfer flows settled, each warehouse's net rate is a
 //      constant and its fill/empty time is closed-form (scheduleWarehouse).
 //   4. Deposit depletion reads the (transfer-aware) extractor throttles from phase 2.
+//   5. Island XP: re-anchor each registered island's XP accumulator and cache its throughput
+//      rate, read from the realized extractor/converter rates settled above.
 // Rates are stepwise-constant between events. Global (not targeted) re-derivation is
 // O(entities) per event/command; revisit only if a profile ever shows it.
 function deriveAll(state: SimState): void {
@@ -122,19 +130,52 @@ function deriveAll(state: SimState): void {
     reanchorDeposit(deposit, t);
     deriveDepositDepletion(state, id, deposit);
   });
+  // Phase 5: re-anchor each registered island's XP and cache its new throughput rate. Runs
+  // last because throughput reads the realized extractor/converter rates settled above.
+  // Purely an accumulator re-anchor — XP schedules no events (no cap, no crossing), so there
+  // is nothing to invalidate here.
+  forEachIslandProgress(state, (island, progress) => {
+    progress.xpAnchor += progress.xpRate * (t - progress.xpAnchorTime);
+    progress.xpAnchorTime = t;
+    progress.xpRate = islandThroughput(state, island);
+  });
 }
 
 // Derive-time only: scans the extractor table for the nominal (pre-throttle) producer
 // rate into a warehouse. Queries read the cached warehouse.inflow instead (query(t) must
 // not allocate or scan). Transfer inflow is settled separately by solveTransfers.
 function totalInflow(state: SimState, warehouseId: Id): number {
+  // The island's extraction multiplier (skill nodes) scales every producer on it uniformly,
+  // so it factors out of the sum. Kept identical to extractorEffectiveRate's nominal so fill
+  // scheduling and the realized/depletion rate never diverge.
+  const islandMult = islandExtractionMultiplier(state, getWarehouse(state, warehouseId).islandId);
   let inflow = 0;
   forEachExtractor(state, (_id, extractor) => {
     if (extractor.warehouseId === warehouseId) {
       inflow += extractor.rate * currentMultiplier(getDeposit(state, extractor.depositId));
     }
   });
-  return inflow;
+  return inflow * islandMult;
+}
+
+// Derive-time only: an island's realized production rate — what feeds its XP accumulator.
+// Sums the post-throttle extractor rates into the island's pools plus converter output landing
+// there (extraction + refinement, DESIGN.md). Route inflow is excluded: it moves already-
+// produced units between islands, it is not production. A jammed (pinned-full, undrained) pool
+// throttles its producers to 0, so XP pauses exactly when throughput does.
+function islandThroughput(state: SimState, island: IslandId): number {
+  let rate = 0;
+  forEachExtractor(state, (id, extractor) => {
+    if (getWarehouse(state, extractor.warehouseId).islandId === island) {
+      rate += extractorEffectiveRate(state, id);
+    }
+  });
+  forEachConverter(state, (id, converter) => {
+    if (getWarehouse(state, converter.dstId).islandId === island) {
+      rate += converterFeed(state, id);
+    }
+  });
+  return rate;
 }
 
 // Capped proportional water-filling — the atomic split used two mirror ways: a
@@ -538,14 +579,35 @@ export function depositMultiplier(state: SimState, id: Id): number {
 
 export function extractorEffectiveRate(state: SimState, id: Id): number {
   const extractor = getExtractor(state, id);
-  const nominal = extractor.rate * currentMultiplier(getDeposit(state, extractor.depositId));
   const warehouse = getWarehouse(state, extractor.warehouseId);
+  // island multiplier factored in here and in totalInflow (kept identical) so fill and
+  // depletion agree.
+  const nominal =
+    extractor.rate *
+    currentMultiplier(getDeposit(state, extractor.depositId)) *
+    islandExtractionMultiplier(state, warehouse.islandId);
   if (warehouse.regime !== "pinned-full") {
     return nominal;
   }
   // Producers share the acceptance budget by the water level the solver settled; with no
   // routes this reduces to the old pullRate/inflow proportional throttle.
   return nominal * warehouse.inflowThrottle;
+}
+
+// The island's skill-node extraction multiplier, or 1 for an unregistered island (no XP tree)
+// — so extractors on such islands are unscaled. Reads the stored value, no allocation.
+export function islandExtractionMultiplier(state: SimState, island: IslandId): number {
+  return state.islandProgress.get(island)?.extractionMultiplier ?? 1;
+}
+
+// Island XP at t, closed form from the accumulator anchor. 0 for an unregistered island.
+// Between events xpRate is constant, so this is exact at any query time (ADR-0001 §1).
+export function islandXpAt(state: SimState, island: IslandId, t: number): number {
+  const progress = state.islandProgress.get(island);
+  if (progress === undefined) {
+    return 0;
+  }
+  return progress.xpAnchor + progress.xpRate * (t - progress.xpAnchorTime);
 }
 
 export function warehouseOutflowRate(state: SimState, id: Id): number {
@@ -972,4 +1034,59 @@ export function buildConverter(
   setConverter(state, id, createConverter(srcId, dstId, cap, ratio));
   deriveAll(state);
   return id;
+}
+
+// Register an island's progression state (DESIGN.md: island specialization) so it accrues XP
+// and can carry skill-node modifiers. App content declares which islands have a skill tree;
+// the global knowledge scope is deliberately never registered (its pools stay outside every
+// per-island system). Idempotency is the caller's concern — a double register is a content
+// bug, so it throws rather than silently resetting an island's XP.
+export function registerIsland(state: SimState, t: number, island: IslandId): void {
+  if (island.length === 0) {
+    throw new Error("island tag must be non-empty");
+  }
+  if (state.islandProgress.has(island)) {
+    throw new Error(`island ${island} already registered`);
+  }
+  advance(state, t);
+  setIslandProgress(state, island, createIslandProgress(state.epoch));
+  deriveAll(state);
+}
+
+// Skill-node purchase (extraction branch): pay `cost` from the island then scale its extraction
+// multiplier by `factor`, atomically. Same validate -> advance -> debit -> mutate -> deriveAll
+// shape as buildExtractor. The island must be registered — a multiplier with no XP tree is
+// miswired content, so getIslandProgress throws loud (never the benign InsufficientStockError).
+// deriveAll re-anchors XP with the OLD rate up to t before recomputing against the new
+// multiplier, so mutating first is safe (same ordering as setWarehousePullRate).
+export function applyExtractionMultiplier(
+  state: SimState,
+  t: number,
+  cost: ReadonlyMap<ResourceType, number>,
+  island: IslandId,
+  factor: number,
+): void {
+  if (!Number.isFinite(factor) || !(factor > 0)) {
+    throw new Error(`extraction multiplier factor must be finite and > 0, got ${factor}`);
+  }
+  advance(state, t);
+  const progress = getIslandProgress(state, island); // loud throw if the island has no XP tree
+  debitCost(state, t, island, cost);
+  progress.extractionMultiplier *= factor;
+  deriveAll(state);
+}
+
+// Grant a discrete lump of XP to an island (expedition/milestone XP, DESIGN.md). Re-anchors the
+// accumulator to t so the rate-accrued portion is captured, then adds the lump on top; the
+// closed form (islandXpAt) is untouched, only the anchor jumps. Mirrors grantResource on a
+// warehouse. The island must be registered.
+export function grantIslandXp(state: SimState, t: number, island: IslandId, amount: number): void {
+  if (!Number.isFinite(amount) || !(amount >= 0)) {
+    throw new Error(`XP grant amount must be finite and >= 0, got ${amount}`);
+  }
+  advance(state, t);
+  const progress = getIslandProgress(state, island);
+  progress.xpAnchor += progress.xpRate * (t - progress.xpAnchorTime) + amount;
+  progress.xpAnchorTime = t;
+  deriveAll(state);
 }

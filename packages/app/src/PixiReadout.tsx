@@ -5,6 +5,7 @@ import {
   depositRemainingAt,
   getDeposit,
   getWarehouse,
+  islandXpAt,
   warehouseAmountAt,
   warehouseOutflowRate,
   type IslandId,
@@ -23,10 +24,15 @@ import {
 import {
   buildConverter,
   buildExtractor,
+  buyNode,
+  canBuyNode,
   createDemoWorld,
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
+  islandLevel,
+  islandLevelCeilXp,
+  islandLevelFloorXp,
   nextStorageTier,
   restoreWorld,
   type SavedWorld,
@@ -34,6 +40,7 @@ import {
   type StorageTier,
   upgradeStorage,
   worldIslands,
+  worldSkillNodes,
 } from "./sim/world.ts";
 import { createSimClock } from "./simClock.ts";
 
@@ -180,7 +187,10 @@ export function PixiReadout(): React.JSX.Element {
 
       await app.init({
         width: WIDTH,
-        height: PADDING * 2 + ROW_HEIGHT * (world.warehouses.length + world.deposits.length),
+        height:
+          PADDING * 2 +
+          ROW_HEIGHT *
+            (world.warehouses.length + world.deposits.length + worldIslands(world).length),
         background: 0x0e1a24,
         antialias: true,
         resolution: window.devicePixelRatio,
@@ -311,6 +321,42 @@ export function PixiReadout(): React.JSX.Element {
         });
       });
 
+      // Island XP bars: one per island with a skill tree (registered islands). Shows progress
+      // within the current level; a distinct tint from warehouses (blue) and deposits (amber).
+      worldIslands(world).forEach((island, i) => {
+        const { fill, readout } = makeBar(
+          `${island} XP`,
+          world.warehouses.length + world.deposits.length + i,
+          0x9b7fd6,
+        );
+        let lastFrac = NaN;
+        let lastText = "";
+        rows.push({
+          // Reads scalars directly (no per-frame IslandXpView allocation — perf doc). Both the
+          // bar fill and the label measure progress WITHIN the current level, so they agree.
+          update: (t): void => {
+            const xp = islandXpAt(world.state, island, t);
+            const level = islandLevel(xp);
+            const floor = islandLevelFloorXp(level);
+            const ceil = islandLevelCeilXp(level);
+            const span = ceil === undefined ? 0 : ceil - floor;
+            const frac = span <= 0 ? 1 : Math.max(0, Math.min(1, (xp - floor) / span));
+            if (frac !== lastFrac) {
+              lastFrac = frac;
+              setFrac(fill, frac);
+            }
+            const text =
+              ceil === undefined
+                ? `Lvl ${level} (max)`
+                : `Lvl ${level} · ${Math.floor(xp - floor)} / ${span} XP`;
+            if (text !== lastText) {
+              lastText = text;
+              readout.text = text;
+            }
+          },
+        });
+      });
+
       // Build buttons, created imperatively so the React tree stays static and the frame loop
       // can drive each button's disabled state without a re-render. Each caches its cost Map
       // and island once (the frame loop must not allocate — perf doc) and rewrites its own
@@ -409,6 +455,44 @@ export function PixiReadout(): React.JSX.Element {
               }
             }
             const enabled = tier !== undefined && canAffordBuild(world.state, t, island, costMap);
+            if (enabled !== lastEnabled) {
+              lastEnabled = enabled;
+              el.disabled = !enabled;
+            }
+          },
+        });
+      }
+
+      // Skill-node buttons (DESIGN.md: island specialization). Like the build buttons but gated on
+      // island level + prerequisites (canBuyNode), not just affordability. A research-gated
+      // junction node is a static locked button — it never becomes buyable this pass, so it takes
+      // no per-frame update.
+      for (const node of worldSkillNodes(world)) {
+        const el = document.createElement("button");
+        el.type = "button";
+        const costText = formatCost(node.cost);
+        if (node.researchGated === true) {
+          el.textContent = `🔒 ${node.label} · Lvl ${node.levelRequired} — research required`;
+          el.disabled = true;
+          controls.appendChild(el);
+          continue;
+        }
+        el.addEventListener("click", () => {
+          if (buyNode(world, node.id, epochAtStart + clock.now())) requestSave?.();
+        });
+        controls.appendChild(el);
+        let lastOwned: boolean | null = null;
+        let lastEnabled: boolean | null = null;
+        buttons.push({
+          update: (t): void => {
+            const owned = world.purchasedNodes.includes(node.id);
+            const enabled = canBuyNode(world, node.id, t);
+            if (owned !== lastOwned) {
+              lastOwned = owned;
+              el.textContent = owned
+                ? `${node.label} — owned`
+                : `Skill: ${node.label} · Lvl ${node.levelRequired} (${costText})`;
+            }
             if (enabled !== lastEnabled) {
               lastEnabled = enabled;
               el.disabled = !enabled;

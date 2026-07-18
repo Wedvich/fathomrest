@@ -5,7 +5,9 @@ import {
   createSimState,
   deserializeState,
   getWarehouse,
+  grantIslandXp,
   grantResource,
+  islandExtractionMultiplier,
   islandId,
   resourceType,
   type ResourceType,
@@ -17,10 +19,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildConverter,
   buildExtractor,
+  buyNode,
+  canBuyNode,
   createDemoWorld,
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
+  islandXpView,
   nextStorageTier,
   restoreWorld,
   type SavedWorld,
@@ -514,7 +519,7 @@ describe("knowledge tier", () => {
     // them via core commands at the restore epoch (no retroactive production across the gap).
     const fresh = createDemoWorld(1, 0);
     const saved = structuredClone(snapshotWorld(fresh));
-    const priorVersion = WORLD_CONTENT_VERSION - 1;
+    const priorVersion = 2; // iron-era: before knowledge (v2→v3) and the skill tree (v3→v4)
     const preKnowledge: SavedWorld = {
       ...saved,
       warehouses: saved.warehouses.filter((w) => w.label !== "Knowledge"),
@@ -527,6 +532,9 @@ describe("knowledge tier", () => {
         ...saved.doc,
         warehouses: saved.doc.warehouses.filter(([, w]) => w.resource !== KNOWLEDGE),
         deposits: saved.doc.deposits.filter(([, d]) => d.resource !== KNOWLEDGE),
+        // A genuine iron-era (v2) doc predates the island-XP schema; drop it so the v3→v4 upgrade
+        // step registers HOME cleanly (the fixture derives from createDemoWorld, which registers it).
+        islandProgress: [],
       },
     };
 
@@ -536,5 +544,104 @@ describe("knowledge tier", () => {
     expect(restored.deposits.filter((d) => d.resource === KNOWLEDGE)).toHaveLength(1);
     // Backfilled: every pre-knowledge deposit funds from its pool's island again.
     for (const deposit of restored.deposits) expect(deposit.payIslandId).toBe(HOME);
+  });
+});
+
+// The island skill tree (DESIGN.md: island specialization) as scenarios: HOME accrues XP from
+// its extraction throughput, trunk nodes gate on level (XP) + cost and apply an island
+// extraction multiplier that persists in core state, and the research-gated junction stays
+// locked. Drives the real core commands through the world API, no mocks.
+describe("island skill tree", () => {
+  const HOME = islandId("home");
+
+  it("gates a trunk node behind XP level and cost, applies its multiplier, and persists", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(world);
+    // Build both base extractors: HOME now produces 4/s (2 wood + 2 stone), accruing XP; each
+    // build pays the cross-resource, leaving both pools at 10.
+    expect(buildExtractor(world, woodA.id, 0)).toBe(true);
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
+
+    const nodeId = "home-efficient-tools"; // level 2, costs 40 wood + 40 stone, 1.15x
+    // At t=0 the island is level 1 (0 XP) — locked regardless of stock.
+    expect(islandXpView(world, HOME, 0).level).toBe(1);
+    expect(canBuyNode(world, nodeId, 0)).toBe(false);
+    expect(buyNode(world, nodeId, 0)).toBe(false);
+
+    // By t=15: XP is 4*15 = 60 (level 3 >= 2) and both pools have refilled to 40 (10 + 2*15).
+    advance(world.state, 15);
+    expect(islandXpView(world, HOME, 15).level).toBeGreaterThanOrEqual(2);
+    expect(canBuyNode(world, nodeId, 15)).toBe(true);
+
+    expect(buyNode(world, nodeId, 15)).toBe(true);
+    expect(world.purchasedNodes).toContain(nodeId);
+    // Cost paid: the Wood pool 40 -> 0 at t=15.
+    expect(warehouseAmountAt(world.state, woodA.warehouseId, 15)).toBeCloseTo(0, 9);
+    // Production accelerates island-wide: the wood extractor now yields 2 * 1.15 = 2.3/s.
+    expect(warehouseAmountAt(world.state, woodA.warehouseId, 16)).toBeCloseTo(2.3, 9);
+    // Idempotent: a second buy is refused.
+    expect(buyNode(world, nodeId, 16)).toBe(false);
+
+    // The multiplier lives in core state, so it survives a save/reload.
+    world.state.wallTime = 0;
+    const restored = restoreWorld(structuredClone(snapshotWorld(world)), 0);
+    expect(restored.purchasedNodes).toContain(nodeId);
+    expect(islandExtractionMultiplier(restored.state, HOME)).toBeCloseTo(1.15, 9);
+  });
+
+  it("keeps research-gated junction nodes locked even with the trunk owned, XP maxed, stock full", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(world);
+    expect(buildExtractor(world, woodA.id, 0)).toBe(true);
+    expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
+    // Force max level so only cost/prereq/research can gate.
+    grantIslandXp(world.state, 0, HOME, 1000);
+
+    // Buy the whole trunk, topping stock before each so cost never blocks.
+    for (const trunkId of [
+      "home-efficient-tools",
+      "home-sharper-edges",
+      "home-quarry-discipline",
+    ]) {
+      grantResource(world.state, 0, woodA.warehouseId, 100);
+      grantResource(world.state, 0, stoneA.warehouseId, 100);
+      expect(buyNode(world, trunkId, 0)).toBe(true);
+    }
+    // Prerequisite (quarry-discipline) owned, XP maxed, stock full: the ONLY remaining blocker on
+    // the junction is the research-gate stub.
+    grantResource(world.state, 0, woodA.warehouseId, 100);
+    grantResource(world.state, 0, stoneA.warehouseId, 100);
+    for (const junctionId of ["home-extraction-mastery", "home-refinement-mastery"]) {
+      expect(canBuyNode(world, junctionId, 0)).toBe(false);
+      expect(buyNode(world, junctionId, 0)).toBe(false);
+    }
+  });
+
+  it("registers HOME's XP on a pre-skill-tree (v3) save at the restore epoch, no retroactive XP", () => {
+    const fresh = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(fresh);
+    expect(buildExtractor(fresh, woodA.id, 0)).toBe(true);
+    expect(buildExtractor(fresh, stoneA.id, 0)).toBe(true);
+    advance(fresh.state, 40);
+    fresh.state.wallTime = 0;
+
+    // Downgrade to a knowledge-era (v3) save: strip islandProgress (a v3 doc predates island XP)
+    // and label the envelope v3, so restore must register HOME via the upgrade step.
+    const snap = structuredClone(snapshotWorld(fresh));
+    const v3: SavedWorld = {
+      ...snap,
+      contentVersion: 3,
+      doc: { ...snap.doc, islandProgress: [] },
+    };
+
+    const restored = restoreWorld(v3, 0); // now == wallTime: no offline gap
+    expect(snapshotWorld(restored).contentVersion).toBe(WORLD_CONTENT_VERSION);
+    // Registration happens at the restore epoch, AFTER catch-up: the 40s of pre-restore extraction
+    // is not retroactively credited.
+    const epoch = restored.state.epoch;
+    expect(islandXpView(restored, HOME, epoch).xp).toBeCloseTo(0, 9);
+    // But XP accrues going forward — the extractors are still running.
+    advance(restored.state, epoch + 10);
+    expect(islandXpView(restored, HOME, restored.state.epoch).xp).toBeGreaterThan(0);
   });
 });

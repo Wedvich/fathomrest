@@ -1,6 +1,6 @@
 // Post-commit live drive: headless Chromium against the dev server, walking the storage-upgrade
 // flow end-to-end (fresh world -> build base economy -> buy the knowledge observatory -> buy
-// storage rung 1 -> IndexedDB reopen).
+// storage rung 1 -> buy a skill-tree trunk node -> IndexedDB reopen).
 // A verification harness, not a test suite — Vitest owns scenario coverage. Pool readout bars are
 // Pixi CANVAS text and cannot be asserted from the DOM: assertions target the <button> elements;
 // screenshots capture the bars for visual inspection.
@@ -132,6 +132,22 @@ async function main() {
 
   await page.waitForTimeout(1_500); // ~90 frames: the label must not thrash
   assert((await storage.textContent()) === afterLabel, "label stable after the upgrade");
+
+  // --- Skill tree: HOME accrues XP from throughput; a trunk node gates on level + cost, the
+  // research-gated junction stays locked ---
+  // The junction node is present but permanently locked (research doesn't exist yet).
+  const junction = page.getByRole("button", { name: /Extraction Mastery/ });
+  await junction.waitFor({ timeout: 5_000 });
+  assert(await junction.isDisabled(), "research-gated junction node stays locked");
+
+  // The trunk node "Efficient Tools" (level 2, 40 wood + 40 stone) enables once XP has passed
+  // level 2 and the pools have re-accrued 40/40 after the storage spend; buying flips it to owned.
+  const skillNode = page.getByRole("button", { name: /Skill: Efficient Tools/ });
+  await skillNode.waitFor({ timeout: 5_000 });
+  await waitEnabled(page, "Efficient Tools");
+  await skillNode.click();
+  await page.getByRole("button", { name: /Efficient Tools — owned/ }).waitFor({ timeout: 5_000 });
+  await page.screenshot({ path: join(OUT_DIR, "4-skill-node-owned.png") });
   await ctx.close();
 
   // --- Session 2: reopen the same profile — IndexedDB restore + offline catch-up ---
@@ -140,7 +156,9 @@ async function main() {
   await page2.waitForTimeout(1_000);
   const reopenLabel = await storage2.textContent();
   assert(/→ 500/.test(reopenLabel ?? ""), `restored rung after reopen, got "${reopenLabel}"`);
-  await page2.screenshot({ path: join(OUT_DIR, "4-reopen.png") });
+  // The bought skill node persists across the reopen (its effect lives in core state).
+  await page2.getByRole("button", { name: /Efficient Tools — owned/ }).waitFor({ timeout: 5_000 });
+  await page2.screenshot({ path: join(OUT_DIR, "5-reopen.png") });
   await ctx2.close();
 
   assert(pageErrors.length === 0, `no console/page errors, got:\n${pageErrors.join("\n")}`);

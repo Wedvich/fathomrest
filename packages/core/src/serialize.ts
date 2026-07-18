@@ -1,6 +1,7 @@
 import type { Converter } from "./components/converter.ts";
 import type { Deposit, DepositTier } from "./components/deposit.ts";
 import type { Extractor } from "./components/extractor.ts";
+import type { IslandProgress } from "./components/island-progress.ts";
 import type { Route } from "./components/route.ts";
 import { WAREHOUSE_REGIMES, type Warehouse } from "./components/warehouse.ts";
 import {
@@ -12,7 +13,7 @@ import {
 } from "./events.ts";
 import { topoSort } from "./graph.ts";
 import type { Id } from "./ids.ts";
-import { islandId } from "./island.ts";
+import { islandId, type IslandId } from "./island.ts";
 import type { PrngState } from "./prng.ts";
 import type { ResourceType } from "./resource.ts";
 import { isStaleEvent } from "./sim.ts";
@@ -22,7 +23,7 @@ import type { SimState } from "./state.ts";
 // entry arrays, events as a sorted list. One codec for export, import, and future cloud
 // sync — the schema never forks.
 
-const SAVE_VERSION = 3;
+const SAVE_VERSION = 4;
 
 export type TableEntries<T> = [Id, T][];
 
@@ -38,6 +39,9 @@ export interface SaveDocument {
   deposits: TableEntries<Deposit>;
   routes: TableEntries<Route>;
   converters: TableEntries<Converter>;
+  // Per-island progression accumulators, keyed by island tag (island-progress.ts). Not a
+  // TableEntries (those key by numeric Id); islands are opaque string tags.
+  islandProgress: [IslandId, IslandProgress][];
 }
 
 // Tables and events are copied in both directions so a save document never aliases
@@ -93,6 +97,9 @@ export function serializeState(state: SimState): SaveDocument {
     deposits: tableToEntries(state.deposits, copyDeposit),
     routes: tableToEntries(state.routes),
     converters: tableToEntries(state.converters),
+    islandProgress: [...state.islandProgress].map(
+      ([island, progress]): [IslandId, IslandProgress] => [island, { ...progress }],
+    ),
   };
 }
 
@@ -316,6 +323,32 @@ function validateDocument(doc: SaveDocument): void {
     checkPositive(converter.ratio, `${at}.ratio`);
     checkNonNegative(converter.flow, `${at}.flow`);
   });
+  // Per-island progression: string-keyed (island tags), so validated with its own loop rather
+  // than checkTable (which keys by numeric id). Sign/range mirror the command boundary
+  // (sim.ts) and the accumulator invariants (XP only grows from 0; the multiplier is a product
+  // of positive factors).
+  if (!Array.isArray(doc.islandProgress)) {
+    throw invalid("islandProgress must be an array");
+  }
+  const islandProgressKeys = new Set<string>();
+  for (const entry of doc.islandProgress) {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw invalid("islandProgress entries must be [island, progress] pairs");
+    }
+    const [island, progress] = entry;
+    checkTag(island, "islandProgress island");
+    if (islandProgressKeys.has(island)) {
+      throw invalid(`islandProgress island ${island} duplicated`);
+    }
+    islandProgressKeys.add(island);
+    if (progress === null || typeof progress !== "object") {
+      throw invalid(`islandProgress[${island}] must be an object`);
+    }
+    checkNonNegative(progress.xpAnchor, `islandProgress[${island}].xpAnchor`);
+    checkFinite(progress.xpAnchorTime, `islandProgress[${island}].xpAnchorTime`);
+    checkNonNegative(progress.xpRate, `islandProgress[${island}].xpRate`);
+    checkPositive(progress.extractionMultiplier, `islandProgress[${island}].extractionMultiplier`);
+  }
   // The solver's convergence bound rests on an acyclic transfer graph; a hand-edited
   // save with a cycle would otherwise throw deep inside a later advance(). Reject it here.
   checkTransfersAcyclic(doc.routes, doc.converters);
@@ -369,6 +402,9 @@ function migrateDocument(doc: SaveDocument): SaveDocument {
   if (migrated.version === 2) {
     migrated = { ...migrated, version: 3, converters: [] };
   }
+  if (migrated.version === 3) {
+    migrated = { ...migrated, version: 4, islandProgress: [] };
+  }
   return migrated;
 }
 
@@ -396,5 +432,11 @@ export function deserializeState(doc: SaveDocument): SimState {
     deposits: entriesToTable(migrated.deposits, copyDeposit),
     routes: entriesToTable(migrated.routes),
     converters: entriesToTable(migrated.converters),
+    islandProgress: new Map(
+      migrated.islandProgress.map(([island, progress]): [IslandId, IslandProgress] => [
+        island,
+        { ...progress },
+      ]),
+    ),
   };
 }
