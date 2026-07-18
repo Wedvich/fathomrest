@@ -1,0 +1,239 @@
+import { getWarehouse, warehouseAmountAt } from "@fathomrest/core";
+import { useEffect, useState } from "react";
+
+import { resetSave } from "../persistence.ts";
+import { PixiReadout } from "../PixiReadout.tsx";
+import { UpdatePrompt } from "../UpdatePrompt.tsx";
+import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
+import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens.ts";
+
+// App shell (design handoff 1a/5b): top HUD bar over a canvas region, with the
+// research / island-plan / map surfaces as full-screen overlays (Esc or ✕ closes).
+// The overlays are token-styled scaffolds — real content lands in later phases; what
+// ships here is the navigation model and the HUD chrome.
+
+type OverlayKind = "research" | "island-plan" | "map";
+
+const OVERLAYS: Record<
+  OverlayKind,
+  { title: string; scope: string; tone: "violet" | "parchment" }
+> = {
+  research: { title: "Research", scope: "GLOBAL · CUMULATIVE", tone: "violet" },
+  "island-plan": { title: "Island plan", scope: "PER-ISLAND", tone: "parchment" },
+  map: { title: "Archipelago", scope: "CAPTAIN'S CHART", tone: "parchment" },
+};
+
+const hudStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  height: 52,
+  padding: "0 14px",
+  background: `linear-gradient(${ocean.shoal}, ${ocean.harborSlate})`,
+  borderBottom: `2px solid ${ocean.abyss}`,
+  color: ocean.moonlight,
+};
+
+const crestStyle: React.CSSProperties = {
+  width: 34,
+  height: 34,
+  borderRadius: "50%",
+  border: `2px solid ${brass.base}`,
+  background: ocean.deepWater,
+  flex: "none",
+};
+
+const titleStyle: React.CSSProperties = {
+  margin: 0,
+  fontFamily: headingFont,
+  fontWeight: 400,
+  fontSize: 17,
+  whiteSpace: "nowrap",
+  color: brass.onDark,
+};
+
+const hudButtonStyle: React.CSSProperties = {
+  width: 30,
+  height: 30,
+  padding: 0,
+  fontSize: 15,
+  background: ocean.harborSlate,
+  border: `1px solid ${ocean.tideLine}`,
+  borderRadius: 5,
+  color: ocean.moonlight,
+};
+
+const knowledgePillStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "3px 10px 3px 4px",
+  borderRadius: 12,
+  background: violet.bg,
+  border: `1px solid ${violet.borderHi}`,
+  color: violet.pale,
+  fontSize: 12,
+};
+
+const knowledgeIconStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 17,
+  height: 17,
+  borderRadius: "50%",
+  background: `radial-gradient(circle at 35% 30%, ${violet.light}, ${violet.core})`,
+  color: "#fff",
+  fontSize: 10,
+  fontWeight: 700,
+};
+
+async function handleReset(): Promise<void> {
+  await resetSave();
+  location.reload();
+}
+
+// Global Knowledge pill (violet + round icon per hard rule 1) — the first React
+// readout on the coarse-tick path, proving the sim-view layer.
+function KnowledgePill(): React.JSX.Element | null {
+  const session = useSimSession();
+  useSimTick();
+  if (session === null) return null;
+  const poolId = session.world.knowledgePoolId;
+  if (poolId === undefined) return null;
+  const t = session.advanceToNow();
+  // Floor with epsilon, like the Pixi readout: never show knowledge the player can't spend.
+  const amount = Math.floor(warehouseAmountAt(session.world.state, poolId, t) + 1e-9);
+  const capacity = getWarehouse(session.world.state, poolId).capacity;
+  return (
+    <span style={knowledgePillStyle}>
+      <span style={knowledgeIconStyle}>K</span>
+      <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
+        {amount} / {capacity}
+      </span>
+    </span>
+  );
+}
+
+function OverlayScaffold({
+  kind,
+  onClose,
+}: {
+  kind: OverlayKind;
+  onClose: () => void;
+}): React.JSX.Element {
+  const spec = OVERLAYS[kind];
+  const dark = spec.tone === "violet";
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 10,
+        display: "flex",
+        flexDirection: "column",
+        background: dark
+          ? `radial-gradient(circle at 50% 40%, ${violet.bg}, ${violet.bgDeepest})`
+          : `linear-gradient(${parchment.sailcloth}, ${parchment.base})`,
+        color: dark ? violet.pale : parchment.ink,
+        fontFamily: bodyFont,
+      }}
+    >
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "12px 18px",
+          borderBottom: `1px solid ${dark ? violet.border : parchment.brassEdge}`,
+        }}
+      >
+        <h2
+          style={{
+            margin: 0,
+            fontFamily: headingFont,
+            fontWeight: 400,
+            fontSize: 20,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {spec.title}
+        </h2>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2 }}>{spec.scope}</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" title="Close" onClick={onClose}>
+          ✕
+        </button>
+      </header>
+      <p style={{ margin: 24, opacity: 0.7 }}>Scaffold — content lands in a later phase.</p>
+    </div>
+  );
+}
+
+export function AppShell(): React.JSX.Element {
+  const session = useSimSession();
+  const [overlay, setOverlay] = useState<OverlayKind | null>(null);
+
+  useEffect(() => {
+    if (overlay === null) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setOverlay(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay]);
+
+  return (
+    <div style={{ minHeight: "100vh", background: ocean.deepWater, fontFamily: bodyFont }}>
+      <header style={hudStyle}>
+        <span style={crestStyle} aria-hidden="true" />
+        <h1 style={titleStyle}>Fathomrest</h1>
+        <span style={{ flex: 1 }} />
+        <KnowledgePill />
+        <button
+          type="button"
+          style={hudButtonStyle}
+          title="Research"
+          aria-label="Open research"
+          onClick={() => setOverlay("research")}
+        >
+          ⚗
+        </button>
+        {/* Opens from the island header once the island view lands (phase 1);
+            HUD placement is temporary. */}
+        <button
+          type="button"
+          style={hudButtonStyle}
+          title="Island plan"
+          aria-label="Open island plan"
+          onClick={() => setOverlay("island-plan")}
+        >
+          📜
+        </button>
+        <button
+          type="button"
+          style={hudButtonStyle}
+          title="Archipelago map"
+          aria-label="Open archipelago map"
+          onClick={() => setOverlay("map")}
+        >
+          🗺
+        </button>
+        <button type="button" title="Reset save" onClick={() => void handleReset()}>
+          Reset
+        </button>
+      </header>
+      <main style={{ padding: 24 }}>
+        {session === null ? (
+          <p style={{ color: ocean.foam }}>Loading…</p>
+        ) : (
+          <PixiReadout session={session} />
+        )}
+      </main>
+      {overlay !== null && <OverlayScaffold kind={overlay} onClose={() => setOverlay(null)} />}
+      <UpdatePrompt />
+    </div>
+  );
+}

@@ -9,6 +9,27 @@
   src: url("/fonts/coming-soon-latin-400.woff2") format("woff2");
 }
 
+/* Caveat Brush (OFL-1.1) — design-handoff heading/flavor face.
+   License: public/fonts/Caveat-Brush-LICENSE.txt.
+   Full TTF from Google Fonts; woff2/latin subsetting is a tracked follow-up (TODO.md). */
+@font-face {
+  font-family: "Caveat Brush";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/caveat-brush-400.ttf") format("truetype");
+}
+
+/* Playpen Sans (OFL-1.1) — design-handoff body/data face, variable wght 100–800
+   (the handoff uses 300–800). License: public/fonts/Playpen-Sans-LICENSE.txt. */
+@font-face {
+  font-family: "Playpen Sans";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/playpen-sans-wght.ttf") format("truetype-variations");
+}
+
 /* App-wide default so DOM UI (buttons, future React views) matches the Pixi readout.
    Scope this down later if some surfaces want a different face. */
 :root {

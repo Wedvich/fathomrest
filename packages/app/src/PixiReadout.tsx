@@ -1,5 +1,4 @@
 import {
-  advance,
   canAffordBuild,
   depositMultiplier,
   depositRemainingAt,
@@ -18,13 +17,7 @@ import {
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { useEffect, useRef } from "react";
 
-import {
-  ensurePersistentStorage,
-  loadSavedWorld,
-  quarantineCorruptSave,
-  readSaveBreadcrumb,
-  writeSavedWorld,
-} from "./persistence.ts";
+import type { SimSession } from "./sim/session.ts";
 import {
   buildConverter,
   buildExtractor,
@@ -32,8 +25,6 @@ import {
   canBuyNode,
   cancelResearch,
   collectCompletedResearch,
-  createDemoWorld,
-  type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
   islandLevel,
@@ -46,41 +37,26 @@ import {
   nextStorageTier,
   type ResearchNode,
   researchConsumedGiven,
-  restoreWorld,
-  type SavedWorld,
-  snapshotWorld,
   startResearch,
   type StorageTier,
   upgradeStorage,
   worldIslands,
   worldSkillNodes,
 } from "./sim/world.ts";
-import { createSimClock } from "./simClock.ts";
+import { preloadUiFonts } from "./ui/fonts.ts";
 
 const WIDTH = 480;
 const ROW_HEIGHT = 72;
 const BAR_HEIGHT = 28;
 const PADDING = 24;
 
-// Autosave cadence. Elapsed time is reconstructed from the saved (epoch, wallTime) anchor
-// on load, so this need not be tight for time-tracking — it bounds how much player state
-// (once commands mutate the world) a crash could lose. Lifecycle events (hidden/pagehide)
-// save too, but teardown-time saves are unreliable: WebKit drops ones needing an async
-// open hop (persistence.ts holds one long-lived connection to dodge that), and Firefox
-// aborts even a synchronous pagehide put. This interval and save-on-command are the
-// writes that always land.
-const AUTOSAVE_INTERVAL_MS = 15_000;
-
-// Placeholder Pixi readout: owns the sim clock and drives advance(t)/query(t) off Pixi's
-// ticker (itself rAF-based). The React tree stays static; all animation lives in the
-// ticker, so there is no per-frame React re-render. Sim time comes from simClock:
-// monotonic between frames, re-anchored against the wall clock on visibility-return and
-// persisted pageshow, so time lost to OS-level tab suspension (Safari) is caught up in
-// one advance() — per docs/browser-performance.md §lifecycle / ADR-0001 §4.
-//
-// The world is loaded from IndexedDB when a save exists (with offline catch-up), else a
-// fresh demo world; it is saved on visibility-hidden, pagehide, and a periodic backstop.
-export function PixiReadout(): React.JSX.Element {
+// Placeholder Pixi scene: draws the readout bars and drives advance(t)/query(t) off
+// Pixi's ticker (itself rAF-based). The React tree stays static; all animation lives
+// in the ticker, so there is no per-frame React re-render. The sim clock, world
+// loading, and persistence live in the SimSession (sim/session.ts) — this component
+// only draws the world it is handed and issues commands through session.command,
+// which persists and notifies React subscribers on every acted command.
+export function PixiReadout({ session }: { session: SimSession }): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
   // The build buttons (one per deposit) are created imperatively inside the effect once the
   // world loads, so the React tree stays static and the frame loop can toggle their disabled
@@ -92,8 +68,6 @@ export function PixiReadout(): React.JSX.Element {
     const controls = controlsRef.current;
     if (host === null || controls === null) return;
 
-    ensurePersistentStorage();
-
     let disposed = false;
     const app = new Application();
     // Set only once init resolves — the destroy gate. app.renderer is `undefined` (not
@@ -101,100 +75,15 @@ export function PixiReadout(): React.JSX.Element {
     // Pixi's second destroy() throws on the double free.
     let live: Application | null = null;
 
-    const clock = createSimClock();
-
-    // Set once the world is loaded; lifecycle listeners registered below are no-ops until
-    // then. Persists the world at its current sim time and re-stamps the wall-clock anchor.
-    let requestSave: (() => void) | null = null;
-
-    const onVisibility = (): void => {
-      if (document.visibilityState === "visible") {
-        clock.reanchor();
-      } else {
-        requestSave?.();
-      }
-    };
-    const onPageShow = (event: PageTransitionEvent): void => {
-      if (event.persisted) clock.reanchor();
-    };
-    const onPageHide = (): void => requestSave?.();
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pageshow", onPageShow);
-    window.addEventListener("pagehide", onPageHide);
-    const autosave = window.setInterval(() => requestSave?.(), AUTOSAVE_INTERVAL_MS);
+    const world = session.world;
 
     void (async () => {
-      // A failed read (e.g. Safari's transient "connection lost" right after
-      // navigation — persistence.ts retries once before giving up) is NOT the same as
-      // "no save exists". Treating it as such and then autosaving the resulting fresh
-      // world clobbers the real save a few seconds later — this was the "save resets
-      // every 2-10 refreshes" bug. On a genuine read failure this session runs
-      // in-memory with persistence disabled instead, leaving the existing save alone
-      // for the next reload to retry.
-      let saved: SavedWorld | null = null;
-      let persistenceDisabled = false;
+      // Decode the UI faces before the first Pixi Text is built (see ui/fonts.ts);
+      // a load failure is non-fatal — the fontFamily fallbacks still render.
       try {
-        saved = await loadSavedWorld();
+        await preloadUiFonts();
       } catch (error) {
-        persistenceDisabled = true;
-        console.error("Failed to load saved world; continuing without persistence.", error);
-      }
-      if (disposed) return;
-      // An absent save when the breadcrumb says one existed means the database was lost
-      // outside the app (eviction, corruption, a privacy setting clearing site data) —
-      // log it so a reset in the wild is attributable.
-      if (saved === null && !persistenceDisabled) {
-        const crumb = readSaveBreadcrumb();
-        if (crumb !== null) {
-          console.error(
-            `No save found, but one existed (epoch ${crumb.epoch}, saved ${new Date(crumb.wallTime).toISOString()}) — storage was cleared outside the app.`,
-          );
-        }
-      }
-      // Schema guard: fall back to a fresh world only if the save is absent, predates the
-      // envelope's view models (deposits/buildSite), or is unmigratable. Core deserialize
-      // forward-migrates older documents (e.g. v1 saves gain the islandId field), so a routine
-      // schema bump preserves idle progress rather than resetting it.
-      let world: DemoWorld | null = null;
-      if (saved !== null) {
-        try {
-          if (!("deposits" in saved))
-            throw new Error("save predates the deposits/buildSite envelope");
-          world = restoreWorld(saved, Date.now());
-        } catch (error) {
-          // Unrestorable save: quarantined (not destroyed) for post-mortem, and the main
-          // slot cleared so the epoch guard accepts the fresh world's saves (ADR-0001 §8).
-          console.error(
-            "Saved world failed to restore; quarantining it and starting fresh.",
-            error,
-          );
-          void quarantineCorruptSave(saved).catch((qError: unknown) => {
-            console.error("Failed to quarantine the corrupt save.", qError);
-          });
-        }
-      }
-      world ??= createDemoWorld(1, Date.now());
-      // Canonical current sim time is epochAtStart + clock.now(): clock.now() grows from 0
-      // at mount, epochAtStart carries any epoch a loaded save already advanced to.
-      const epochAtStart = world.state.epoch;
-
-      requestSave = (): void => {
-        if (persistenceDisabled) return;
-        advance(world.state, epochAtStart + clock.now());
-        world.state.wallTime = Date.now();
-        void writeSavedWorld(snapshotWorld(world)).catch((error: unknown) => {
-          console.error("Failed to save world.", error);
-        });
-      };
-
-      // Pixi v8 Text renders through the browser font system and won't re-layout when a
-      // face loads later, so ensure "Coming Soon" is decoded before the first Text is built;
-      // otherwise the first frame draws in the monospace fallback. A load failure is
-      // non-fatal — the fallback in fontFamily still renders.
-      try {
-        await document.fonts.load('16px "Coming Soon"');
-      } catch (error) {
-        console.error("Failed to load the Coming Soon font; falling back.", error);
+        console.error("Failed to preload UI fonts; falling back.", error);
       }
       if (disposed) return;
 
@@ -445,9 +334,9 @@ export function PixiReadout(): React.JSX.Element {
         const costMap = new Map<ResourceType, number>(spec.cost);
         const island: IslandId = spec.payIslandId;
         el.addEventListener("click", () => {
-          // Save-on-command: persist only when the build actually happened; a rejected build
-          // (unaffordable) leaves state untouched, so there is nothing to save.
-          if (spec.build(epochAtStart + clock.now())) requestSave?.();
+          // session.command persists only when the build actually happened; a rejected
+          // build (unaffordable) leaves state untouched, so there is nothing to save.
+          session.command(spec.build);
         });
         controls.appendChild(el);
         let lastBuilt: boolean | null = null;
@@ -502,7 +391,7 @@ export function PixiReadout(): React.JSX.Element {
         const el = document.createElement("button");
         el.type = "button";
         el.addEventListener("click", () => {
-          if (upgradeStorage(world, island, epochAtStart + clock.now())) requestSave?.();
+          session.command((t) => upgradeStorage(world, island, t));
         });
         controls.appendChild(el);
         let lastTier: StorageTier | undefined | null = null; // null: no frame rendered yet
@@ -539,7 +428,7 @@ export function PixiReadout(): React.JSX.Element {
         const costText = formatCost(node.cost);
         const otherBranch = node.branch === "extraction" ? "Refinement" : "Extraction";
         el.addEventListener("click", () => {
-          if (buyNode(world, node.id, epochAtStart + clock.now())) requestSave?.();
+          session.command((t) => buyNode(world, node.id, t));
         });
         controls.appendChild(el);
         let lastLabel: string | null = null;
@@ -580,11 +469,11 @@ export function PixiReadout(): React.JSX.Element {
         const el = document.createElement("button");
         el.type = "button";
         el.addEventListener("click", () => {
-          const t = epochAtStart + clock.now();
-          const acted = isResearchActive(world, node)
-            ? cancelResearch(world, t)
-            : startResearch(world, node, t);
-          if (acted) requestSave?.();
+          session.command((t) =>
+            isResearchActive(world, node)
+              ? cancelResearch(world, t)
+              : startResearch(world, node, t),
+          );
         });
         controls.appendChild(el);
         let lastLabel: string | null = null;
@@ -609,12 +498,13 @@ export function PixiReadout(): React.JSX.Element {
         });
       }
 
+      const collect = (t: number): boolean => collectCompletedResearch(world, t);
       const tick = (): void => {
-        const t = epochAtStart + clock.now();
-        advance(world.state, t);
-        // Bank a node that finished this frame (online or across an offline jump) before rendering,
-        // so its bar reads "researched" the same frame the drain crossed cost; persist that.
-        if (collectCompletedResearch(world, t)) requestSave?.();
+        // Bank a node that finished this frame (online or across an offline jump) before
+        // rendering, so its bar reads "researched" the same frame the drain crossed cost;
+        // session.command persists and notifies subscribers when that happens.
+        session.command(collect);
+        const t = session.advanceToNow();
         // Refresh the active-research scan for this frame's row/button reads (no per-node rescan).
         activeResearchId = null;
         activeResearchNodeId = null;
@@ -637,16 +527,12 @@ export function PixiReadout(): React.JSX.Element {
     return () => {
       disposed = true;
       controls.textContent = ""; // drop the imperatively-created build buttons
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pageshow", onPageShow);
-      window.removeEventListener("pagehide", onPageHide);
-      window.clearInterval(autosave);
       // Only destroy a fully-initialized app; if init hasn't resolved, the disposed
       // guard destroys it once when it does. app.ticker.remove(tick) is unnecessary —
       // destroy() tears down the app's own ticker (sharedTicker: false by default).
       if (live !== null) live.destroy(true);
     };
-  }, []);
+  }, [session]);
 
   return (
     <div>

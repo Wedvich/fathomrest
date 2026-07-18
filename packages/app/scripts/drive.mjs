@@ -103,6 +103,20 @@ async function main() {
   await page.getByRole("button", { name: /Build extractor · Stone A vein/ }).click();
   await page.screenshot({ path: join(OUT_DIR, "1-before-upgrade.png") });
 
+  // --- App shell (design-handoff phase 0): the HUD Knowledge pill is the first React readout on
+  // the coarse-tick path, and the research overlay scaffold opens from the HUD and closes on Esc.
+  const pill = page.getByText(/^\d+ \/ \d+$/);
+  await pill.waitFor({ timeout: 5_000 });
+  const overlay = page.getByRole("dialog");
+  await page.getByRole("button", { name: "Open research" }).click();
+  await overlay.waitFor({ timeout: 2_000 });
+  assert(
+    await overlay.getByText("GLOBAL · CUMULATIVE").isVisible(),
+    "research overlay scaffold shows its scope label",
+  );
+  await page.keyboard.press("Escape");
+  await overlay.waitFor({ state: "detached", timeout: 2_000 });
+
   // The knowledge observatory (the first global-scoped resource) is cost-gated only: 40 wood + 40
   // stone, unaffordable at the 10/10 the base builds leave behind.
   const observatory = page.getByRole("button", { name: /Build extractor · Knowledge deposit/ });
