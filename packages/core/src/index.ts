@@ -50,6 +50,22 @@ export {
   type WarehouseRegime,
 } from "./components/warehouse.ts";
 export {
+  converterStatus,
+  isWarehouseJammed,
+  isWarehouseStarved,
+  listJams,
+  routeStatus,
+  warehouseJamChain,
+  type JamChain,
+  type JamChainStep,
+  type JamEntry,
+  type JamRoot,
+  type JamRootKind,
+  type JamVia,
+  type TransferKind,
+  type TransferStatus,
+} from "./jam.ts";
+export {
   addConverter,
   applyExtractionMultiplier,
   applyRefinementMultiplier,

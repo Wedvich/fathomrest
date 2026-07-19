@@ -253,7 +253,11 @@ function allocateCapped(
       }
     }
     if (activeWeight <= 0) {
-      return level; // no unpinned demand left (all pinned at ceiling, or nothing to split)
+      // No unpinned demand left: every competitor sits at its ceiling (or there was nothing
+      // to split), so nobody was proportionally denied and the throttle is 1. Returning the
+      // stale last-round level here would brand a balanced boundary pool (budget == Σu_i) as
+      // throttled — a phantom jam/starvation in the triage queries (jam.ts).
+      return 1;
     }
     level = remaining / activeWeight;
     let pinnedAny = false;
@@ -463,7 +467,11 @@ function solveTransfers(state: SimState): {
       warehouse.inflowThrottle = allocateCapped(grossOut, weights, ceilings, alloc);
       warehouse.regime = "pinned-full";
       for (const [i, edge] of ins.entries()) {
-        edge.dstCap = (alloc[i + 1] ?? 0) / edge.ratio;
+        const granted = alloc[i + 1] ?? 0;
+        // A ceiling-pinned edge was granted exactly srcCap·ratio; write srcCap back directly
+        // so the ratio round-trip ((srcCap·ratio)/ratio) can't round an ulp under srcCap and
+        // read a fully-granted edge as throttled (jam.ts relies on exact flow == cap).
+        edge.dstCap = granted === edge.srcCap * edge.ratio ? edge.srcCap : granted / edge.ratio;
       }
     }
 
