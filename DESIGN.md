@@ -226,6 +226,16 @@ researchRequired`, both home masters gate on _Tidal Almanac_) AND on **branch
   agree — more refined output per input, source draw unchanged). Serialized on
   `IslandProgress` (SAVE_VERSION 6, v5→v6 backfills identity), so it survives round-trip
   and offline catch-up like the extraction multiplier.
+- **Shipped (vertical slice):** **branch depth** — three authored nodes past each
+  mastery (levels 6–8 on an extended XP ladder), pure content in
+  `world.ts: HOME_SKILL_TREE`. Both branches ship as a single **linear** chain, not yet
+  the multiple sub-paths the branch list above envisions: extraction depth is throughput
+  multipliers (the deposit-longevity sub-path waits for a longevity effect type);
+  refinement depth is converter-yield multipliers whose product keeps effective yield
+  below 1 ingot/ore (no mass minted — asserted behaviorally by test, not by a comment).
+  Costs climb the storage ladder per the accepted cost↔storage coupling; refinement rungs
+  are paid partly in iron (the branch's own output funds its upgrades), though their
+  wood/stone components still gate on a storage upgrade like extraction.
 
 All tree content is app-authored data over generic core primitives (timed-unlock
 queue, XP accumulator, gate predicates) — reconfigurable via content edits +

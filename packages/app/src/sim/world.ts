@@ -235,7 +235,7 @@ export interface SkillNode {
 
 // XP required to REACH each level (index 0 = level 1 at 0 XP). islandLevel counts thresholds at
 // or below the XP, so it returns 1..THRESHOLDS.length. Placeholder tuning (DESIGN.md slice).
-const XP_LEVEL_THRESHOLDS: readonly number[] = [0, 20, 60, 140, 260];
+const XP_LEVEL_THRESHOLDS: readonly number[] = [0, 20, 60, 140, 260, 440, 680, 1000];
 
 export function islandLevel(xp: number): number {
   let level = 0;
@@ -256,8 +256,13 @@ export function islandLevelCeilXp(level: number): number | undefined {
   return XP_LEVEL_THRESHOLDS[level];
 }
 
-// Node costs stay <= the base warehouse cap (100) so the trunk is buyable without a storage
-// upgrade, and above STARTING_STOCK (30) so the base economy must be running (DESIGN.md).
+// Trunk costs stay <= the base warehouse cap (100) so the trunk is buyable without a storage
+// upgrade, and above STARTING_STOCK (30) so the base economy must be running. Branch-depth
+// costs deliberately climb the storage ladder (120+ needs tier 1, 300 needs tier 2) — node
+// costs coupled to storage progression is accepted in DESIGN.md. Refinement rungs are paid
+// partly in iron (the branch's own output funds its upgrades); their iron components stay under
+// the base cap, but their wood/stone components still gate on a storage upgrade like extraction.
+// A content test asserts every cost fits under the top storage tier, so none is unbuyable-forever.
 const HOME_SKILL_TREE: readonly SkillNode[] = [
   {
     id: "home-efficient-tools",
@@ -325,6 +330,89 @@ const HOME_SKILL_TREE: readonly SkillNode[] = [
     prerequisites: ["home-quarry-discipline"],
     effectFactor: 1.1,
     researchRequired: researchNodeId("tidal-almanac"),
+  },
+  // Extraction branch depth: throughput multipliers past the junction (the deposit-longevity
+  // sub-path waits for a longevity effect type). Linear chain, one node per level rung.
+  {
+    id: "home-deep-veins",
+    island: HOME,
+    branch: "extraction",
+    label: "Deep Veins",
+    levelRequired: 6,
+    cost: [
+      [WOOD, 120],
+      [STONE, 120],
+    ],
+    prerequisites: ["home-extraction-mastery"],
+    effectFactor: 1.2,
+  },
+  {
+    id: "home-cliffside-hoists",
+    island: HOME,
+    branch: "extraction",
+    label: "Cliffside Hoists",
+    levelRequired: 7,
+    cost: [
+      [WOOD, 180],
+      [STONE, 180],
+    ],
+    prerequisites: ["home-deep-veins"],
+    effectFactor: 1.2,
+  },
+  {
+    id: "home-tide-driven-dredgers",
+    island: HOME,
+    branch: "extraction",
+    label: "Tide-Driven Dredgers",
+    levelRequired: 8,
+    cost: [
+      [WOOD, 300],
+      [STONE, 300],
+    ],
+    prerequisites: ["home-cliffside-hoists"],
+    effectFactor: 1.25,
+  },
+  // Refinement branch depth: converter-yield multipliers. Their product must keep the effective
+  // converter yield below 1 ingot per ore, so refinement never mints mass — enforced behaviorally
+  // by the "never mints mass" scenario test (feed < draw), not by an arithmetic comment that rots.
+  {
+    id: "home-hotter-furnaces",
+    island: HOME,
+    branch: "refinement",
+    label: "Hotter Furnaces",
+    levelRequired: 6,
+    cost: [
+      [STONE, 120],
+      [IRON_ORE, 40],
+    ],
+    prerequisites: ["home-refinement-mastery"],
+    effectFactor: 1.1,
+  },
+  {
+    id: "home-bellows-crews",
+    island: HOME,
+    branch: "refinement",
+    label: "Bellows Crews",
+    levelRequired: 7,
+    cost: [
+      [WOOD, 180],
+      [IRON_INGOT, 60],
+    ],
+    prerequisites: ["home-hotter-furnaces"],
+    effectFactor: 1.15,
+  },
+  {
+    id: "home-master-smelters",
+    island: HOME,
+    branch: "refinement",
+    label: "Master Smelters",
+    levelRequired: 8,
+    cost: [
+      [IRON_ORE, 90],
+      [IRON_INGOT, 90],
+    ],
+    prerequisites: ["home-bellows-crews"],
+    effectFactor: 1.2,
   },
 ];
 
@@ -768,6 +856,16 @@ export function isNodeResearchLocked(world: DemoWorld, node: SkillNode): boolean
   if (node.researchRequired === undefined) return false;
   const research = RESEARCH_NODES_BY_ID.get(node.researchRequired);
   return research === undefined || !isResearched(world, research);
+}
+
+// Whether the node's cost can never be met at the island's CURRENT storage cap — a storage upgrade,
+// not more accumulation, is the fix. Branch-depth costs deliberately exceed the base cap, so this
+// is a distinct lock reason the base economy alone can't clear (before branch depth every node fit
+// under the base cap). Independent of level/research/branch gates; exposed for the UI's lock-reason
+// label so an eligible-but-over-cap node reads "needs storage" rather than a silent grey button.
+export function nodeNeedsStorage(world: DemoWorld, node: SkillNode): boolean {
+  const cap = islandStorageCap(world.state, node.island);
+  return node.cost.some(([, amount]) => amount > cap);
 }
 
 // Shared purchasability guard (the non-cost half): research gate, branch exclusivity, known island

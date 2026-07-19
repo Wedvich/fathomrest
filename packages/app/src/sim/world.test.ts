@@ -2,6 +2,9 @@ import {
   addDeposit,
   addWarehouse,
   advance,
+  converterDraw,
+  converterFeed,
+  converterIds,
   createSimState,
   deserializeState,
   getWarehouse,
@@ -29,11 +32,14 @@ import {
   type DemoWorld,
   isConverterBuilt,
   isExtractorBuilt,
+  islandLevel,
+  islandLevelFloorXp,
   islandXpView,
   isNodeBranchLocked,
   isResearchActive,
   isResearched,
   nextStorageTier,
+  nodeNeedsStorage,
   researchConsumed,
   type ResearchNode,
   restoreWorld,
@@ -57,6 +63,13 @@ function namedDeposits(world: DemoWorld): {
   const [woodA, woodB, stoneA, stoneB] = world.deposits;
   if (!woodA || !woodB || !stoneA || !stoneB) throw new Error("demo world deposit shape changed");
   return { woodA, woodB, stoneA, stoneB };
+}
+
+// A warehouse id by its display label (pools are one-per-(island, resource), labels unique).
+function poolId(world: DemoWorld, label: string): ReturnType<typeof addWarehouse> {
+  const warehouse = world.warehouses.find((w) => w.label === label);
+  if (!warehouse) throw new Error(`no warehouse labelled ${label}`);
+  return warehouse.id;
 }
 
 // The wood/stone bootstrap as scenarios: the world boots with a seeded stockpile and no
@@ -314,12 +327,6 @@ function woodStoneV1Save(poolCap = 100): SavedWorld {
 // commands through the world layer, no mocks.
 describe("iron refinement tier", () => {
   const ironOre = resourceType("iron-ore");
-
-  function poolId(world: DemoWorld, label: string): ReturnType<typeof addWarehouse> {
-    const warehouse = world.warehouses.find((w) => w.label === label);
-    if (!warehouse) throw new Error(`no warehouse labelled ${label}`);
-    return warehouse.id;
-  }
 
   it("a fresh world offers iron-ore deposits, iron pools, and a refinery site", () => {
     const world = createDemoWorld(1, 0);
@@ -607,7 +614,7 @@ describe("island skill tree", () => {
     const { woodA, stoneA } = namedDeposits(world);
     expect(buildExtractor(world, woodA.id, 0)).toBe(true);
     expect(buildExtractor(world, stoneA.id, 0)).toBe(true);
-    grantIslandXp(world.state, 0, HOME, 1000); // force max level
+    grantIslandXp(world.state, 0, HOME, 1_000_000); // force max level (past the top rung, any tuning)
     const top = (): void => {
       grantResource(world.state, 0, woodA.warehouseId, 100);
       grantResource(world.state, 0, stoneA.warehouseId, 100);
@@ -628,6 +635,48 @@ describe("island skill tree", () => {
     world.researchProgress.set(researchNodeId(id), cost);
   };
 
+  // The multiplier core must hold after buys: the product of effectFactor over owned nodes feeding
+  // the given multiplier (trunk + extraction feed extraction; refinement feeds refinement). Folded
+  // from the tree data, so retuning an effectFactor can't silently desync the expectation.
+  const ownedMultiplier = (world: DemoWorld, kind: "extraction" | "refinement"): number => {
+    const branches = kind === "extraction" ? ["trunk", "extraction"] : ["refinement"];
+    return worldSkillNodes(world)
+      .filter((n) => world.purchasedNodes.includes(n.id) && branches.includes(n.branch))
+      .reduce((product, n) => product * n.effectFactor, 1);
+  };
+
+  // Grant just enough XP to reach `level` (grants are cumulative; these scenarios have no XP rate),
+  // via the ladder function so retuning a threshold can't strand the target level.
+  const liftToLevel = (world: DemoWorld, level: number): void => {
+    const current = islandXpView(world, HOME, 0).xp;
+    grantIslandXp(world.state, 0, HOME, Math.max(0, islandLevelFloorXp(level) - current));
+  };
+
+  // junctionReady + the full refinement branch bought: research completed, storage raised for the
+  // wood/stone rungs, iron pools kept topped. Shared by the refinement-depth scenarios.
+  function equipRefinementBranch(): DemoWorld {
+    const { world } = junctionReady(); // XP maxed, trunk owned
+    markResearched(world, "tidal-almanac", 100);
+    const fill = (): void => {
+      for (const label of ["Wood", "Stone", "Iron Ore", "Iron Ingot"]) {
+        grantResource(world.state, 0, poolId(world, label), 1000); // clamps at the current cap
+      }
+    };
+    fill();
+    expect(upgradeStorage(world, HOME, 0)).toBe(true); // the 120/180 wood/stone rungs need tier 1
+    fill();
+    for (const id of [
+      "home-refinement-mastery",
+      "home-hotter-furnaces",
+      "home-bellows-crews",
+      "home-master-smelters",
+    ]) {
+      expect(buyNode(world, id, 0)).toBe(true);
+      fill();
+    }
+    return world;
+  }
+
   it("keeps the junction locked until its research completes, then unlocks it", () => {
     const { world } = junctionReady();
     // Trunk owned, XP maxed, stock full: the only remaining blocker is the (incomplete) research.
@@ -646,7 +695,10 @@ describe("island skill tree", () => {
     markResearched(world, "tidal-almanac", 100);
     // Commit to Extraction: its multiplier lifts, and the Refinement branch locks out.
     expect(buyNode(world, "home-extraction-mastery", 0)).toBe(true);
-    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(1.15 * 1.15 * 1.2 * 1.3, 9);
+    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(
+      ownedMultiplier(world, "extraction"),
+      9,
+    );
     const refinement = worldSkillNodes(world).find((n) => n.id === "home-refinement-mastery");
     if (!refinement) throw new Error("no refinement node");
     expect(isNodeBranchLocked(world, refinement)).toBe(true);
@@ -660,10 +712,143 @@ describe("island skill tree", () => {
     const extractionBefore = islandExtractionMultiplier(world.state, HOME);
     expect(buyNode(world, "home-refinement-mastery", 0)).toBe(true);
     // The refinement node lifts the refinement multiplier (converter yield) and leaves extraction alone.
-    expect(islandRefinementMultiplier(world.state, HOME)).toBeCloseTo(1.1, 9);
+    expect(islandRefinementMultiplier(world.state, HOME)).toBeCloseTo(
+      ownedMultiplier(world, "refinement"),
+      9,
+    );
     expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(extractionBefore, 9);
     // ...and now Extraction is the locked-out branch.
     expect(canBuyNode(world, "home-extraction-mastery", 0)).toBe(false);
+  });
+
+  // Branch depth (levels 6–8): each rung gates on a new XP threshold, its wood/stone cost climbs the
+  // storage ladder, and every node compounds the committed branch's multiplier. Levels are reached
+  // via the ladder function and the multiplier folded from the tree, so retuning either can't
+  // silently desync the test; stock grants clamp at the pool cap, so a storage upgrade is genuinely
+  // required. Real commands for everything else.
+  it("walks the extraction branch to the capstone: level rungs gate WHEN, the storage ladder gates WHETHER", () => {
+    const world = createDemoWorld(1, 0);
+    const { woodA, stoneA } = namedDeposits(world);
+    const fill = (): void => {
+      grantResource(world.state, 0, woodA.warehouseId, 1000); // clamps at the current cap
+      grantResource(world.state, 0, stoneA.warehouseId, 1000);
+    };
+    markResearched(world, "tidal-almanac", 100);
+    liftToLevel(world, 5); // trunk + junction reachable, nothing deeper
+    for (const id of [
+      "home-efficient-tools",
+      "home-sharper-edges",
+      "home-quarry-discipline",
+      "home-extraction-mastery",
+    ]) {
+      fill();
+      expect(buyNode(world, id, 0)).toBe(true);
+    }
+
+    // Deep Veins costs over the base cap, so a storage upgrade must come first; even fully stocked
+    // it stays locked until its level rung.
+    fill();
+    expect(upgradeStorage(world, HOME, 0)).toBe(true);
+    fill();
+    expect(canBuyNode(world, "home-deep-veins", 0)).toBe(false); // stocked, but still under level
+    liftToLevel(world, 6);
+    expect(buyNode(world, "home-deep-veins", 0)).toBe(true);
+
+    liftToLevel(world, 7);
+    fill();
+    expect(buyNode(world, "home-cliffside-hoists", 0)).toBe(true);
+
+    // The capstone's cost outruns tier-1 storage: reaching its level rung isn't enough until a
+    // further upgrade lifts the cap above the cost.
+    liftToLevel(world, 8);
+    fill();
+    expect(canBuyNode(world, "home-tide-driven-dredgers", 0)).toBe(false); // at level, but capped out
+    expect(upgradeStorage(world, HOME, 0)).toBe(true);
+    fill();
+    expect(buyNode(world, "home-tide-driven-dredgers", 0)).toBe(true);
+
+    // Every owned trunk + extraction node compounded into the extraction multiplier, once each.
+    // (Save/reload of purchasedNodes + multiplier is content-independent — already covered by the
+    // trunk persistence test above, so it isn't re-asserted here.)
+    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(
+      ownedMultiplier(world, "extraction"),
+      9,
+    );
+  });
+
+  it("buys the full refinement branch (paid partly in iron) and lifts only the refinement multiplier", () => {
+    const world = equipRefinementBranch();
+    // Only the refinement (converter-yield) multiplier moved; extraction stayed at the trunk
+    // product it held before the junction. Both folded from the tree, not transcribed.
+    expect(islandRefinementMultiplier(world.state, HOME)).toBeCloseTo(
+      ownedMultiplier(world, "refinement"),
+      9,
+    );
+    expect(islandExtractionMultiplier(world.state, HOME)).toBeCloseTo(
+      ownedMultiplier(world, "extraction"),
+      9,
+    );
+  });
+
+  it("never mints mass: even the full refinement branch keeps refined yield below the ore it draws", () => {
+    const world = equipRefinementBranch();
+    // equipRefinementBranch leaves the ingot pool full; one more upgrade gives the refinery somewhere
+    // to produce, so its flow is non-zero and the effective ratio actually manifests.
+    grantResource(world.state, 0, poolId(world, "Wood"), 1000);
+    grantResource(world.state, 0, poolId(world, "Stone"), 1000);
+    expect(upgradeStorage(world, HOME, 0)).toBe(true);
+    const [site] = world.converterSites;
+    if (!site) throw new Error("iron refinery site missing");
+    expect(buildConverter(world, site, 0)).toBe(true);
+    advance(world.state, 1);
+    const [converterId] = converterIds(world.state);
+    if (converterId === undefined) throw new Error("no converter built");
+    const draw = converterDraw(world.state, converterId); // ore consumed / s
+    const feed = converterFeed(world.state, converterId); // ingot produced / s
+    expect(draw).toBeGreaterThan(0); // the ratio is only meaningful while the refinery runs
+    expect(feed).toBeLessThan(draw); // < 1 ingot per ore even at full refinement — mass conserved
+  });
+
+  // Whole-tree content sanity (not just the six new nodes): a dangling prerequisite, an unreachable
+  // level, or a cost no storage tier can hold would make a node silently unbuyable forever
+  // (canBuyNode just returns false) — dead content that ships with no other test red.
+  it("authors a well-formed tree: prereqs resolve, levels are reachable, and every cost fits storage", () => {
+    const nodes = worldSkillNodes(createDemoWorld(1, 0));
+    const ids = new Set(nodes.map((n) => n.id));
+    const maxLevel = islandLevel(Number.MAX_SAFE_INTEGER); // saturates at the ladder length
+    for (const node of nodes) {
+      for (const prereq of node.prerequisites) {
+        expect(ids.has(prereq)).toBe(true); // a dangling prereq locks the node forever
+      }
+      expect(node.levelRequired).toBeGreaterThanOrEqual(1);
+      expect(node.levelRequired).toBeLessThanOrEqual(maxLevel);
+    }
+    // Climb to the top storage tier, then assert it holds every cost. Drives the real ladder, so it
+    // tracks STORAGE_TIERS without restating any capacity.
+    const world = createDemoWorld(1, 0);
+    while (nextStorageTier(world, HOME) !== undefined) {
+      grantResource(world.state, 0, poolId(world, "Wood"), 100_000);
+      grantResource(world.state, 0, poolId(world, "Stone"), 100_000);
+      expect(upgradeStorage(world, HOME, 0)).toBe(true);
+    }
+    const maxCap = getWarehouse(world.state, poolId(world, "Wood")).capacity;
+    for (const node of nodes) {
+      for (const [, amount] of node.cost) {
+        expect(amount).toBeLessThanOrEqual(maxCap);
+      }
+    }
+  });
+
+  it("flags an over-cap node as needing a storage upgrade, then clears once the cap covers the cost", () => {
+    const world = createDemoWorld(1, 0);
+    const deepVeins = worldSkillNodes(world).find((n) => n.id === "home-deep-veins");
+    if (!deepVeins) throw new Error("no deep-veins node");
+    // Deep Veins costs more than the base cap: no amount of accumulation makes it affordable.
+    expect(nodeNeedsStorage(world, deepVeins)).toBe(true);
+    grantResource(world.state, 0, poolId(world, "Wood"), 100);
+    grantResource(world.state, 0, poolId(world, "Stone"), 100);
+    expect(upgradeStorage(world, HOME, 0)).toBe(true); // cap now covers the cost
+    expect(nodeNeedsStorage(world, deepVeins)).toBe(false);
   });
 
   it("registers HOME's XP on a pre-skill-tree (v3) save at the restore epoch, no retroactive XP", () => {

@@ -36,6 +36,7 @@ import {
   isResearchActive,
   isResearched,
   nextStorageTier,
+  nodeNeedsStorage,
   type ResearchNode,
   researchConsumedGiven,
   startResearch,
@@ -440,6 +441,8 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
               label = `🔒 ${node.label} — ${otherBranch} branch chosen`;
             } else if (isNodeResearchLocked(world, node)) {
               label = `🔒 ${node.label} · Lvl ${node.levelRequired} — research required`;
+            } else if (nodeNeedsStorage(world, node)) {
+              label = `🔒 ${node.label} · Lvl ${node.levelRequired} — needs bigger storage`;
             } else {
               label = `Skill: ${node.label} · Lvl ${node.levelRequired} (${costText})`;
             }

@@ -39,8 +39,9 @@ Phases, in order — sim-side prerequisites interleaved where noted:
   completions, ranked jam list) + the dialog + deep-link fix buttons.
 - **Phase 4 — island skill tree (`3c`)** (promoted ahead of research: sim side is done —
   junction gate + branch exclusivity landed; `isNodeResearchLocked`/`isNodeBranchLocked`
-  map 1:1 onto the two locked treatments). Fold in **branch depth** authoring (3–4 nodes
-  per branch; each branch currently has only its mastery node).
+  map 1:1 onto the two locked treatments). **Branch depth is authored** (3 nodes past
+  each mastery, levels 6–8, storage-ladder/iron costs — `world.ts: HOME_SKILL_TREE`);
+  only the panel UI remains.
 - **Phase 3 — research panel (`3a`).** Interleave with unlock-tree part 3 core work:
   queue depth 0→1 machinery (enqueue, auto-start on prereqs, blocked node holds queue),
   first resource-sample gate, research-gated storage upgrade. Panel can land first with
