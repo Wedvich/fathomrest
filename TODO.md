@@ -10,14 +10,19 @@ Recreate the five committed surfaces from `docs/design_handoff_fathomrest_ui/REA
 (React panels + Pixi canvas; high fidelity for layout/color/type, placeholders for art).
 Phases, in order — sim-side prerequisites interleaved where noted:
 
-- **Phase 0 — foundations (in progress).** Design-token module (parchment/ocean ramps,
-  accents, resource colors — one hex source for React strings + Pixi numbers); bundle
-  Caveat Brush + Playpen Sans (TTFs + OFL, Coming Soon pattern; woff2/latin subsetting is
-  a follow-up — no conversion tooling installed); app shell (HUD bar, canvas region,
-  overlay routing, Esc, deep-link primitive); sim-view layer (event-driven + ≥250 ms
-  coarse-timer React subscription); split `PixiReadout` into sim session (clock,
-  persistence, commands) + island scene, existing readout content kept working inside
-  the shell.
+- **Phase 0 — foundations — DONE.** Design-token module (parchment/ocean ramps, accents,
+  resource colors — one hex source for React strings + Pixi numbers); bundled Caveat
+  Brush + Playpen Sans (TTFs + OFL; "Coming Soon" placeholder retired now that both real
+  faces are wired everywhere — woff2/latin subsetting is still a follow-up, no conversion
+  tooling installed); app shell (HUD bar, canvas region, overlay routing, Esc); sim-view
+  layer (event-driven + ≥250 ms coarse-timer React subscription, `ui/SimSessionProvider.tsx`
+  + `sim/session.ts`); deep-link primitive (`ui/navigation.ts`: `NavigationContext` +
+  `useNavigation()`, HUD buttons route through it — extend `DeepLink` with a focus target
+  when phase 1's log rows / phase 2's fix buttons need one); `PixiReadout` split into sim
+  session (above) + island scene (`scene/IslandScene.ts`'s `useIslandScene` hook — generic
+  Pixi Application create/mount/destroy lifecycle, StrictMode-safe; `PixiReadout` keeps the
+  temp bar/button content as that hook's `build` callback, ready to be swapped for the real
+  island scene in phase 1).
 - **Phase 1 — island view (`1a`).** Top HUD, right dock (pool rows w/ jam states +
   outflow lines, deposit cards, build cards w/ cost chips), Pixi island scene (slot
   markers, JAM/deposit badges), slot tooltip, harbormaster's log. New selectors: jam
@@ -55,14 +60,15 @@ with this track). Non-committed alternates (`1b`,`1c`,`3b`,`4b`) stay design-onl
 
 ## Next session
 
-Continue phase 0 wherever the task list below stands, then phase 1:
+Phase 0 is done (see above). Start island view (`1a`):
 
-1. Finish phase 0 (tokens / fonts / shell / sim-view layer / PixiReadout split) and
-   verify via browser-drive.
-2. Start island view (`1a`): right dock pool rows first (real data exists — jam
-   flag/block reason come from `isWarehouseJammed` + `warehouseJamChain`, landed on the
-   `worktree-rippling-dancing-honey` branch), then build cards + selectors
-   (affordability ETA, outflow attribution).
+1. Right dock pool rows first (real data exists — jam flag/block reason come from
+   `isWarehouseJammed` + `warehouseJamChain`, landed on the
+   `worktree-rippling-dancing-honey` branch), then build cards + selectors (affordability
+   ETA, outflow attribution).
+2. When the dock needs to fill the canvas region properly (design handoff §1: canvas
+   left of a 352 px dock, not the current fixed-width temp readout), that's when
+   `PixiReadout`'s content moves into the real island scene built on `useIslandScene`.
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools, and what lets multiple islands' observatories

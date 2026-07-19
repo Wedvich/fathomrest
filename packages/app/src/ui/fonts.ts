@@ -5,7 +5,6 @@
 // covers every weight.
 export async function preloadUiFonts(): Promise<void> {
   await Promise.all([
-    document.fonts.load('16px "Coming Soon"'),
     document.fonts.load('16px "Caveat Brush"'),
     document.fonts.load('16px "Playpen Sans"'),
   ]);

@@ -6,6 +6,7 @@ import { PixiReadout } from "../PixiReadout.tsx";
 import { displayFloor } from "../sim/display.ts";
 import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
+import { NavigationContext, useNavigation, type OverlayKind } from "./navigation.ts";
 import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
 import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens.ts";
 
@@ -13,8 +14,6 @@ import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens
 // research / island-plan / map surfaces as full-screen overlays (Esc or ✕ closes).
 // The overlays are token-styled scaffolds — real content lands in later phases; what
 // ships here is the navigation model and the HUD chrome.
-
-type OverlayKind = "research" | "island-plan" | "map";
 
 const OVERLAYS: Record<
   OverlayKind,
@@ -198,74 +197,99 @@ function OverlayScaffold({
   );
 }
 
+function HudNav(): React.JSX.Element {
+  const nav = useNavigation();
+  return (
+    <>
+      <button
+        type="button"
+        style={hudButtonStyle}
+        title="Research"
+        aria-label="Open research"
+        onClick={() => nav.navigate({ overlay: "research" })}
+      >
+        ⚗
+      </button>
+      {/* Opens from the island header once the island view lands (phase 1);
+          HUD placement is temporary. */}
+      <button
+        type="button"
+        style={hudButtonStyle}
+        title="Island plan"
+        aria-label="Open island plan"
+        onClick={() => nav.navigate({ overlay: "island-plan" })}
+      >
+        📜
+      </button>
+      <button
+        type="button"
+        style={hudButtonStyle}
+        title="Archipelago map"
+        aria-label="Open archipelago map"
+        onClick={() => nav.navigate({ overlay: "map" })}
+      >
+        🗺
+      </button>
+    </>
+  );
+}
+
+function OverlayHost(): React.JSX.Element | null {
+  const nav = useNavigation();
+  if (nav.activeOverlay === null) return null;
+  return <OverlayScaffold kind={nav.activeOverlay} onClose={() => nav.close()} />;
+}
+
 export function AppShell(): React.JSX.Element {
   const session = useSimSession();
   // Selected island is UI-local state (design handoff). Until the map/island view lands there
   // is nothing to select with, so it derives to the world's first island.
   const selectedIsland = session === null ? undefined : worldIslands(session.world)[0];
-  const [overlay, setOverlay] = useState<OverlayKind | null>(null);
+  const [activeOverlay, setActiveOverlay] = useState<OverlayKind | null>(null);
 
   return (
-    <div
-      style={{
-        height: "100dvh",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        background: ocean.deepWater,
-        fontFamily: bodyFont,
+    <NavigationContext.Provider
+      value={{
+        activeOverlay,
+        navigate: (link) => setActiveOverlay(link.overlay),
+        close: () => setActiveOverlay(null),
       }}
     >
-      <header style={hudStyle}>
-        <span style={crestStyle} aria-hidden="true" />
-        {selectedIsland !== undefined && <h1 style={titleStyle}>{islandTitle(selectedIsland)}</h1>}
-        <span style={{ flex: 1 }} />
-        <KnowledgePill />
-        <button
-          type="button"
-          style={hudButtonStyle}
-          title="Research"
-          aria-label="Open research"
-          onClick={() => setOverlay("research")}
-        >
-          ⚗
-        </button>
-        {/* Opens from the island header once the island view lands (phase 1);
-            HUD placement is temporary. */}
-        <button
-          type="button"
-          style={hudButtonStyle}
-          title="Island plan"
-          aria-label="Open island plan"
-          onClick={() => setOverlay("island-plan")}
-        >
-          📜
-        </button>
-        <button
-          type="button"
-          style={hudButtonStyle}
-          title="Archipelago map"
-          aria-label="Open archipelago map"
-          onClick={() => setOverlay("map")}
-        >
-          🗺
-        </button>
-        <button type="button" title="Reset save" onClick={() => void handleReset()}>
-          Reset
-        </button>
-      </header>
-      {/* The page never scrolls (it's a game, not a document): the shell is a fixed 100dvh
-          column and overflow stays inside <main>. The temp Pixi readout is taller than the
-          viewport, so <main> scrolls internally until the real canvas region replaces it. */}
-      <main style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
-        {session === null ? (
-          <p style={{ color: ocean.foam }}>Loading…</p>
-        ) : (
-          <PixiReadout session={session} />
-        )}
-      </main>
-      {overlay !== null && <OverlayScaffold kind={overlay} onClose={() => setOverlay(null)} />}
-      <UpdatePrompt />
-    </div>
+      <div
+        style={{
+          height: "100dvh",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          background: ocean.deepWater,
+          fontFamily: bodyFont,
+        }}
+      >
+        <header style={hudStyle}>
+          <span style={crestStyle} aria-hidden="true" />
+          {selectedIsland !== undefined && (
+            <h1 style={titleStyle}>{islandTitle(selectedIsland)}</h1>
+          )}
+          <span style={{ flex: 1 }} />
+          <KnowledgePill />
+          <HudNav />
+          <button type="button" title="Reset save" onClick={() => void handleReset()}>
+            Reset
+          </button>
+        </header>
+        {/* The page never scrolls (it's a game, not a document): the shell is a fixed 100dvh
+            column and overflow stays inside <main>. The temp Pixi readout is taller than the
+            viewport, so <main> scrolls internally until the real canvas region replaces it. */}
+        <main style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
+          {session === null ? (
+            <p style={{ color: ocean.foam }}>Loading…</p>
+          ) : (
+            <PixiReadout session={session} />
+          )}
+        </main>
+        <OverlayHost />
+        <UpdatePrompt />
+      </div>
+    </NavigationContext.Provider>
   );
 }

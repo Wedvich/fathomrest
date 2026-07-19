@@ -14,9 +14,10 @@ import {
   type ResearchNodeId,
   type ResourceType,
 } from "@fathomrest/core";
-import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
-import { useEffect, useRef } from "react";
+import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
+import { useRef } from "react";
 
+import { useIslandScene } from "./scene/IslandScene.ts";
 import { displayCeil, displayFloor } from "./sim/display.ts";
 import type { SimSession } from "./sim/session.ts";
 import {
@@ -46,6 +47,7 @@ import {
   worldSkillNodes,
 } from "./sim/world.ts";
 import { preloadUiFonts } from "./ui/fonts.ts";
+import { bodyFont } from "./ui/tokens.ts";
 
 const WIDTH = 480;
 const ROW_HEIGHT = 72;
@@ -60,26 +62,14 @@ const PADDING = 24;
 // which persists and notifies React subscribers on every acted command.
 export function PixiReadout({ session }: { session: SimSession }): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
-  // The build buttons (one per deposit) are created imperatively inside the effect once the
-  // world loads, so the React tree stays static and the frame loop can toggle their disabled
-  // state without a re-render (see the ticker below).
+  // The build buttons (one per deposit) are created imperatively once the world loads, so
+  // the React tree stays static and the frame loop can toggle their disabled state without
+  // a re-render (see the ticker below).
   const controlsRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    const host = hostRef.current;
-    const controls = controlsRef.current;
-    if (host === null || controls === null) return;
-
-    let disposed = false;
-    const app = new Application();
-    // Set only once init resolves — the destroy gate. app.renderer is `undefined` (not
-    // null) pre-init, so destroying on it would tear down a half-built app and then
-    // Pixi's second destroy() throws on the double free.
-    let live: Application | null = null;
-
-    const world = session.world;
-
-    void (async () => {
+  useIslandScene(
+    hostRef,
+    async () => {
       // Decode the UI faces before the first Pixi Text is built (see ui/fonts.ts);
       // a load failure is non-fatal — the fontFamily fallbacks still render.
       try {
@@ -87,14 +77,14 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
       } catch (error) {
         console.error("Failed to preload UI fonts; falling back.", error);
       }
-      if (disposed) return;
 
+      const world = session.world;
       // Research is offered only once the knowledge pool exists (a pre-knowledge save whose
       // content upgrade hasn't landed hides the whole section rather than showing dead rows).
       const researchNodes: readonly ResearchNode[] =
         world.knowledgePoolId === undefined ? [] : world.researchNodes;
 
-      await app.init({
+      return {
         width: WIDTH,
         height:
           PADDING * 2 +
@@ -107,15 +97,17 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
         antialias: true,
         resolution: window.devicePixelRatio,
         autoDensity: true,
-      });
-      // StrictMode runs the effect twice in dev; the first pass may have been torn down
-      // before init resolved. Bail without touching the DOM.
-      if (disposed) {
-        app.destroy(true);
-        return;
-      }
-      host.appendChild(app.canvas);
-      live = app;
+      };
+    },
+    (app) => {
+      const controls = controlsRef.current;
+      if (controls === null) return;
+
+      const world = session.world;
+      // Research is offered only once the knowledge pool exists (a pre-knowledge save whose
+      // content upgrade hasn't landed hides the whole section rather than showing dead rows).
+      const researchNodes: readonly ResearchNode[] =
+        world.knowledgePoolId === undefined ? [] : world.researchNodes;
 
       const barWidth = WIDTH - PADDING * 2;
 
@@ -135,11 +127,11 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
         row.y = PADDING + index * ROW_HEIGHT;
         const labelText = new Text({
           text: label,
-          style: { fill: 0xcfe6f2, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
+          style: { fill: 0xcfe6f2, fontSize: 16, fontFamily: bodyFont },
         });
         const readout = new Text({
           text: "",
-          style: { fill: 0x8fb2c4, fontSize: 16, fontFamily: '"Coming Soon", monospace' },
+          style: { fill: 0x8fb2c4, fontSize: 16, fontFamily: bodyFont },
         });
         // Right-align to the bar's right edge; label stays left-aligned at x=0.
         readout.anchor.set(1, 0);
@@ -518,20 +510,9 @@ export function PixiReadout({ session }: { session: SimSession }): React.JSX.Ele
       };
       tick();
       app.ticker.add(tick);
-    })().catch((error: unknown) => {
-      if (disposed) return;
-      host.textContent = `Pixi init failed: ${String(error)}`;
-    });
-
-    return () => {
-      disposed = true;
-      controls.textContent = ""; // drop the imperatively-created build buttons
-      // Only destroy a fully-initialized app; if init hasn't resolved, the disposed
-      // guard destroys it once when it does. app.ticker.remove(tick) is unnecessary —
-      // destroy() tears down the app's own ticker (sharedTicker: false by default).
-      if (live !== null) live.destroy(true);
-    };
-  }, [session]);
+    },
+    [session],
+  );
 
   return (
     <div>

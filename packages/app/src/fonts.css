@@ -1,14 +1,3 @@
-/* Coming Soon (Apache-2.0) — bundled as a static asset in public/fonts/.
-   License and attribution: public/fonts/Coming-Soon-LICENSE.txt.
-   Latin subset only; swap the src for the full .ttf if wider coverage is needed. */
-@font-face {
-  font-family: "Coming Soon";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url("/fonts/coming-soon-latin-400.woff2") format("woff2");
-}
-
 /* Caveat Brush (OFL-1.1) — design-handoff heading/flavor face.
    License: public/fonts/Caveat-Brush-LICENSE.txt.
    Full TTF from Google Fonts; woff2/latin subsetting is a tracked follow-up (TODO.md). */
@@ -31,9 +20,10 @@
 }
 
 /* App-wide default so DOM UI (buttons, future React views) matches the Pixi readout.
-   Scope this down later if some surfaces want a different face. */
+   Scope this down later if some surfaces want a different face. Keep this stack in
+   sync with ui/tokens.ts's bodyFont — CSS can't import the TS constant. */
 :root {
-  font-family: "Coming Soon", monospace;
+  font-family: "Playpen Sans", "Comic Sans MS", sans-serif;
 }
 
 /* Dark page background so the DOM UI matches the Pixi canvas
