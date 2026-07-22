@@ -60,7 +60,7 @@ with this track). Non-committed alternates (`1b`,`1c`,`3b`,`4b`) stay design-onl
 
 ## Next session
 
-Phase 1 island view (`1a`) in progress. Landed this session:
+Phase 1 island view (`1a`) in progress — the React right dock is complete. Landed:
 
 - **Right dock + WAREHOUSE POOLS** (`ui/IslandDock.tsx`): parchment 352 px `<aside>`,
   pinned right in a flex-row `<main>` (canvas region left, temp `PixiReadout` still fills
@@ -74,22 +74,30 @@ Phase 1 island view (`1a`) in progress. Landed this session:
   `JamRootKind`). `resourceChip()` lookup helper added to `ui/tokens.ts`.
 - Verified live (fresh world screenshot, no console errors); typecheck/lint/166 tests green.
 
+- **DEPOSITS + BUILD sections** (same two files): deposit cards (× badge, reserve bar,
+  `remaining/total`, pause + next-step + floor sub-line) and build cards (striped icon,
+  per-resource cost chips ✓/`need n`, affordability ETA line, `→ GLOBAL K` tag, Build
+  button via `session.command`). Selectors added: `depositCardViews`, `buildCardViews`,
+  `affordabilityEta`. Verified live (fresh → affordable; post-spend → shortfall/ETA/disabled).
+
 Next, in order:
 
-1. **DEPOSITS + BUILD sections** in the dock (stubbed with a comment in `IslandDock.tsx`).
-   Deposit cards (reserve bar, richness ×, pause state, **next-step ETA + floor**) and
-   build cards (icon, cost chips w/ ✓/`need n` shortfall, **affordability ETA**, `→ GLOBAL K`
-   suffix). Migrate the temp readout's build/upgrade/skill/research `<button>`s here.
-   New selectors still to add: affordability ETA, deposit next-step ETA. (Jam/outflow done.)
-2. **Starved pools:** `poolRowViews` currently surfaces `isWarehouseJammed` (full) only —
-   add the `isWarehouseStarved` (empty, amber symptom) treatment when a starve case exists
-   to show it (single-island slice rarely starves yet).
-3. **Harbormaster's log** (React overlay, bottom-left of canvas) rendering `listJams`
+1. **Retire the temp readout / build the real Pixi island scene.** The dock now duplicates
+   the temp `PixiReadout`'s warehouse+deposit bars and build/storage buttons — it's the
+   visible wart. Move `PixiReadout`'s content into a real island scene on `useIslandScene`
+   (radial-ocean bg, slot markers, JAM/deposit badges, slot tooltip); the canvas region
+   then fills the space left of the dock. Skill-node + research buttons currently only live
+   in the temp readout — they need homes (island-plan / research overlays, phases 4/3)
+   BEFORE the readout is deleted, or they vanish. Sequence that: overlays first, or keep a
+   minimal temp control strip until they land.
+2. **Harbormaster's log** (React overlay, bottom-left of canvas) rendering `listJams`
    (roots first) with deep-link action rows — needs `DeepLink` to grow a focus target
    (`navigation.ts` note).
-4. When the dock needs the canvas to fill its region properly, `PixiReadout`'s content
-   moves into the real island scene on `useIslandScene` (slot markers, JAM/deposit badges,
-   slot tooltip). That retires the temp readout bars (now duplicated by the dock pool rows).
+3. **Starved pools:** `poolRowViews` surfaces `isWarehouseJammed` (full) only — add the
+   `isWarehouseStarved` (empty, amber symptom) treatment when a starve case exists to show
+   it (single-island slice rarely starves yet).
+4. **Dock polish deferred:** slot tooltip adjacency copy; deposit-card richness-tier colors;
+   build-card icon art (striped placeholder for now).
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools, and what lets multiple islands' observatories
