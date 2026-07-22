@@ -1,30 +1,23 @@
-import { getWarehouse, warehouseAmountAt, type Id, type IslandId } from "@fathomrest/core";
-import { useEffect, useRef, useState } from "react";
+import type { Id, IslandId } from "@fathomrest/core";
+import { useEffect, useState } from "react";
 
 import { resetSave } from "../persistence.ts";
 import { PixiReadout } from "../PixiReadout.tsx";
-import { displayFloor } from "../sim/display.ts";
 import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
 import { HarbormasterLog } from "./HarbormasterLog.tsx";
 import { IslandDock } from "./IslandDock.tsx";
+import { IslandPlanOverlay } from "./IslandPlanOverlay.tsx";
+import { KnowledgePill } from "./KnowledgePill.tsx";
 import { NavigationContext, useNavigation, type OverlayKind } from "./navigation.ts";
-import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
-import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens.ts";
+import { OverlayFrame } from "./OverlayFrame.tsx";
+import { ResearchOverlay } from "./ResearchOverlay.tsx";
+import { useSimSession } from "./SimSessionProvider.tsx";
+import { bodyFont, brass, headingFont, ocean } from "./tokens.ts";
 
-// App shell (design handoff 1a/5b): top HUD bar over a canvas region, with the
-// research / island-plan / map surfaces as full-screen overlays (Esc or ✕ closes).
-// The overlays are token-styled scaffolds — real content lands in later phases; what
-// ships here is the navigation model and the HUD chrome.
-
-const OVERLAYS: Record<
-  OverlayKind,
-  { title: string; scope: string; tone: "violet" | "parchment" }
-> = {
-  research: { title: "Research", scope: "GLOBAL · CUMULATIVE", tone: "violet" },
-  "island-plan": { title: "Island plan", scope: "PER-ISLAND", tone: "parchment" },
-  map: { title: "Archipelago", scope: "CAPTAIN'S CHART", tone: "parchment" },
-};
+// App shell (design handoff 1a/5b): top HUD bar over a canvas region + right dock, with
+// the research / island-plan / map surfaces as full-screen overlays (Esc or ✕ closes).
+// Research and island-plan render real content; the map stays a scaffold (phase 5).
 
 const hudStyle: React.CSSProperties = {
   display: "flex",
@@ -67,31 +60,6 @@ const hudButtonStyle: React.CSSProperties = {
   color: ocean.moonlight,
 };
 
-const knowledgePillStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "3px 10px 3px 4px",
-  borderRadius: 12,
-  background: violet.bg,
-  border: `1px solid ${violet.borderHi}`,
-  color: violet.pale,
-  fontSize: 12,
-};
-
-const knowledgeIconStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  width: 17,
-  height: 17,
-  borderRadius: "50%",
-  background: `radial-gradient(circle at 35% 30%, ${violet.light}, ${violet.core})`,
-  color: "#fff",
-  fontSize: 10,
-  fontWeight: 700,
-};
-
 async function handleReset(): Promise<void> {
   await resetSave();
   location.reload();
@@ -102,100 +70,11 @@ function islandTitle(island: IslandId): string {
   return island.charAt(0).toUpperCase() + island.slice(1);
 }
 
-// Global Knowledge pill (violet + round icon per hard rule 1) — the first React
-// readout on the coarse-tick path, proving the sim-view layer.
-function KnowledgePill(): React.JSX.Element | null {
-  const session = useSimSession();
-  useSimTick();
-  if (session === null) return null;
-  const poolId = session.world.knowledgePoolId;
-  if (poolId === undefined) return null;
-  // Pure read: renders must not advance the sim (StrictMode/concurrent renders can
-  // re-run or discard). warehouseAmountAt is closed-form and clamped, so reading at
-  // now() without an advance is exact; the Pixi ticker owns advancing.
-  const t = session.now();
-  const amount = displayFloor(warehouseAmountAt(session.world.state, poolId, t));
-  const capacity = getWarehouse(session.world.state, poolId).capacity;
+function MapScaffold({ onClose }: { onClose: () => void }): React.JSX.Element {
   return (
-    <span style={knowledgePillStyle}>
-      <span style={knowledgeIconStyle}>K</span>
-      <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
-        {amount} / {capacity}
-      </span>
-    </span>
-  );
-}
-
-function OverlayScaffold({
-  kind,
-  onClose,
-}: {
-  kind: OverlayKind;
-  onClose: () => void;
-}): React.JSX.Element {
-  const spec = OVERLAYS[kind];
-  const dark = spec.tone === "violet";
-  const ref = useRef<HTMLDialogElement>(null);
-  // showModal(): top layer, background inert (no Tab-behind), focus moved in and
-  // restored to the opener on close, Esc handled natively (cancel → close → onClose).
-  // Open-guarded because StrictMode re-runs the effect and showModal throws on an
-  // already-open dialog; the ✕ button goes through close() so the close event stays
-  // the single unmount path.
-  useEffect(() => {
-    const dialog = ref.current;
-    if (dialog !== null && !dialog.open) dialog.showModal();
-  }, []);
-  return (
-    <dialog
-      ref={ref}
-      onClose={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        maxWidth: "none",
-        maxHeight: "none",
-        margin: 0,
-        padding: 0,
-        border: "none",
-        display: "flex",
-        flexDirection: "column",
-        background: dark
-          ? `radial-gradient(circle at 50% 40%, ${violet.bg}, ${violet.bgDeepest})`
-          : `linear-gradient(${parchment.sailcloth}, ${parchment.base})`,
-        color: dark ? violet.pale : parchment.ink,
-        fontFamily: bodyFont,
-      }}
-    >
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          padding: "12px 18px",
-          borderBottom: `1px solid ${dark ? violet.border : parchment.brassEdge}`,
-        }}
-      >
-        <h2
-          style={{
-            margin: 0,
-            fontFamily: headingFont,
-            fontWeight: 400,
-            fontSize: 20,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {spec.title}
-        </h2>
-        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2 }}>{spec.scope}</span>
-        <span style={{ flex: 1 }} />
-        <button type="button" title="Close" onClick={() => ref.current?.close()}>
-          ✕
-        </button>
-      </header>
-      <p style={{ margin: 24, opacity: 0.7 }}>Scaffold — content lands in a later phase.</p>
-    </dialog>
+    <OverlayFrame title="Archipelago" scope="CAPTAIN'S CHART" tone="parchment" onClose={onClose}>
+      <p style={{ opacity: 0.7 }}>Scaffold — the captain's chart lands in a later phase.</p>
+    </OverlayFrame>
   );
 }
 
@@ -236,10 +115,16 @@ function HudNav(): React.JSX.Element {
   );
 }
 
-function OverlayHost(): React.JSX.Element | null {
+function OverlayHost({ island }: { island: IslandId | undefined }): React.JSX.Element | null {
   const nav = useNavigation();
-  if (nav.activeOverlay === null) return null;
-  return <OverlayScaffold kind={nav.activeOverlay} onClose={() => nav.close()} />;
+  const overlay = nav.activeOverlay;
+  if (overlay === null) return null;
+  const close = (): void => nav.close();
+  if (overlay === "research") return <ResearchOverlay onClose={close} />;
+  if (overlay === "island-plan") {
+    return island === undefined ? null : <IslandPlanOverlay island={island} onClose={close} />;
+  }
+  return <MapScaffold onClose={close} />;
 }
 
 export function AppShell(): React.JSX.Element {
@@ -316,7 +201,7 @@ export function AppShell(): React.JSX.Element {
             </>
           )}
         </main>
-        <OverlayHost />
+        <OverlayHost island={selectedIsland} />
         <UpdatePrompt />
       </div>
     </NavigationContext.Provider>

@@ -6,13 +6,13 @@ import {
   depositCardViews,
   poolRowViews,
   type BuildCardView,
-  type CostChip,
   type DepositCardView,
   type PoolRowView,
 } from "../sim/dock.ts";
 import { displayCeil, displayFloor } from "../sim/display.ts";
 import type { SimSession } from "../sim/session.ts";
 import { islandXpView } from "../sim/world.ts";
+import { CostChipView } from "./CostChips.tsx";
 import { useNavigation } from "./navigation.ts";
 import { useSimTick } from "./SimSessionProvider.tsx";
 import {
@@ -343,29 +343,6 @@ function DepositCard({ card }: { card: DepositCardView }): React.JSX.Element {
           : `→ ×${card.nextStep.multiplier} after ${displayCeil(card.nextStep.after)} more · floor ×${card.floorMultiplier}`}
       </div>
     </li>
-  );
-}
-
-function CostChipView({ chip }: { chip: CostChip }): React.JSX.Element {
-  const affordable = chip.affordable;
-  return (
-    <span
-      style={{
-        ...tabular,
-        padding: "1px 6px",
-        borderRadius: radii.chip,
-        fontSize: 11,
-        whiteSpace: "nowrap",
-        fontWeight: affordable ? 400 : 700,
-        background: affordable ? parchment.agedFold : rust.tintBg,
-        border: `1px solid ${affordable ? parchment.deckShadow : rust.tintBorder}`,
-        color: affordable ? parchment.ink : rust.onParchment,
-      }}
-    >
-      {affordable
-        ? `${chip.amount} ${chip.resource.replace("-", " ")} ✓`
-        : `${chip.amount} — need ${displayCeil(chip.shortfall)}`}
-    </span>
   );
 }
 

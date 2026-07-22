@@ -248,6 +248,28 @@ function affordabilityEta(
   return maxEta;
 }
 
+// Per-resource affordability chips for a cost vector, charged against the island's pools.
+// Shared by build cards and skill-node cards (hard rule 6: missing costs state the shortfall).
+export function costChips(
+  world: DemoWorld,
+  island: IslandId,
+  cost: CostEntries,
+  t: number,
+): CostChip[] {
+  const state = world.state;
+  return cost.map(([resource, amount]) => {
+    const poolId = islandPoolId(world, island, resource);
+    const have = poolId === undefined ? 0 : warehouseAmountAt(state, poolId, t);
+    return {
+      resource,
+      amount,
+      have,
+      affordable: have >= amount,
+      shortfall: Math.max(0, amount - have),
+    };
+  });
+}
+
 function buildCard(
   world: DemoWorld,
   island: IslandId,
@@ -261,17 +283,7 @@ function buildCard(
   },
 ): BuildCardView {
   const state = world.state;
-  const costs: CostChip[] = spec.cost.map(([resource, amount]) => {
-    const poolId = islandPoolId(world, island, resource);
-    const have = poolId === undefined ? 0 : warehouseAmountAt(state, poolId, t);
-    return {
-      resource,
-      amount,
-      have,
-      affordable: have >= amount,
-      shortfall: Math.max(0, amount - have),
-    };
-  });
+  const costs = costChips(world, island, spec.cost, t);
   const affordable = canAffordBuild(state, t, island, new Map(spec.cost));
   return {
     key: spec.key,
