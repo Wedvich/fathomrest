@@ -60,7 +60,8 @@ with this track). Non-committed alternates (`1b`,`1c`,`3b`,`4b`) stay design-onl
 
 ## Next session
 
-Phase 1 island view (`1a`) in progress — the React right dock is complete. Landed:
+Phase 1 island view (`1a`) — React right dock complete; research + island-plan overlays
+(phases 3/4) landed, unblocking the temp-readout retirement. Landed:
 
 - **Right dock + WAREHOUSE POOLS** (`ui/IslandDock.tsx`): parchment 352 px `<aside>`,
   pinned right in a flex-row `<main>` (canvas region left, temp `PixiReadout` still fills
@@ -88,23 +89,34 @@ Phase 1 island view (`1a`) in progress — the React right dock is complete. Lan
   the dock scrolls the target pool row into view and pulses a teal ring. `jamLogEntries`
   added to `sim/dock.ts`. Verified live (two closed-sink jams; Fix scrolls + highlights).
 
+- **Research + island-plan overlays** (`ui/ResearchOverlay.tsx`, `ui/IslandPlanOverlay.tsx`):
+  the two scaffolds are now real content, homing the skill-node/research controls off the
+  temp readout. Island plan = full-parchment surveyor's plan (trunk → research-gated
+  exclusive junction → branch columns, lock reasons from the core predicates, XP-bar
+  header); research = violet star chart with the reduced state set (no queue yet). Shared
+  plumbing extracted: `ui/OverlayFrame.tsx` (modal chrome), `ui/KnowledgePill.tsx`,
+  `ui/CostChips.tsx` + `dock.costChips` (one chip treatment for build + skill cards). Map
+  overlay stays a scaffold (phase 5). Verified live; no console errors.
+
 Next, in order:
 
-1. **Retire the temp readout / build the real Pixi island scene.** The dock now duplicates
-   the temp `PixiReadout`'s warehouse+deposit bars and build/storage buttons — it's the
-   visible wart. Move `PixiReadout`'s content into a real island scene on `useIslandScene`
-   (radial-ocean bg, slot markers, JAM/deposit badges, slot tooltip); the canvas region
-   then fills the space left of the dock. Skill-node + research buttons currently only live
-   in the temp readout — they need homes (island-plan / research overlays, phases 4/3)
-   BEFORE the readout is deleted, or they vanish. Sequence that: overlays first, or keep a
-   minimal temp control strip until they land. Slot tooltip + JAM/deposit badges can reuse
-   the same focus/`nav.focus` plumbing the log now exercises.
+1. **Retire the temp readout / build the real Pixi island scene.** NOW UNBLOCKED — the
+   skill-node + research buttons have homes (overlays above), so `PixiReadout` can be
+   deleted once its content moves. The dock already duplicates its warehouse+deposit bars
+   and build/storage buttons; only the island XP + research-collect ticker logic still lives
+   there. Move `PixiReadout`'s content into a real island scene on `useIslandScene`
+   (radial-ocean bg, slot markers, JAM/deposit badges, slot tooltip); the canvas region then
+   fills the space left of the dock. **Carry over the research-collect loop** — the temp
+   ticker calls `collectCompletedResearch` every frame via `session.command(collect)`; the
+   new scene's ticker (or a small session-owned loop) must keep doing that, or research never
+   banks completion. Slot tooltip + JAM/deposit badges can reuse the `nav.focus` plumbing.
 2. **Starved pools:** `poolRowViews` surfaces `isWarehouseJammed` (full) only — add the
    `isWarehouseStarved` (empty, amber symptom) treatment when a starve case exists to show
    it (single-island slice rarely starves yet). The log already handles `pool-empty` rows.
-3. **Dock polish deferred:** slot tooltip adjacency copy; deposit-card richness-tier colors;
+3. **Deferred polish:** slot tooltip adjacency copy; deposit-card richness-tier colors;
    build-card icon art (striped placeholder for now); log-row jam duration (needs a core
-   jam-onset timestamp — not tracked yet, so the row shows the cause, not "for 4m").
+   jam-onset timestamp — not tracked yet); research overlay's queue strip + sample gates +
+   selected-detail column (needs the phase-3 core work: queue depth 0→1, sample gates).
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools, and what lets multiple islands' observatories
