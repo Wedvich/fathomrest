@@ -1,4 +1,4 @@
-import { getWarehouse, warehouseAmountAt, type IslandId } from "@fathomrest/core";
+import { getWarehouse, warehouseAmountAt, type Id, type IslandId } from "@fathomrest/core";
 import { useEffect, useRef, useState } from "react";
 
 import { resetSave } from "../persistence.ts";
@@ -6,6 +6,7 @@ import { PixiReadout } from "../PixiReadout.tsx";
 import { displayFloor } from "../sim/display.ts";
 import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
+import { HarbormasterLog } from "./HarbormasterLog.tsx";
 import { IslandDock } from "./IslandDock.tsx";
 import { NavigationContext, useNavigation, type OverlayKind } from "./navigation.ts";
 import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
@@ -247,6 +248,14 @@ export function AppShell(): React.JSX.Element {
   // is nothing to select with, so it derives to the world's first island.
   const selectedIsland = session === null ? undefined : worldIslands(session.world)[0];
   const [activeOverlay, setActiveOverlay] = useState<OverlayKind | null>(null);
+  // Transient deep-link focus target: a log "Fix" sets it, the dock pulses/scrolls to it,
+  // then it self-clears so a later re-focus of the same pool re-triggers the effect.
+  const [focusPool, setFocusPool] = useState<Id | null>(null);
+  useEffect(() => {
+    if (focusPool === null) return;
+    const id = window.setTimeout(() => setFocusPool(null), 2500);
+    return () => window.clearTimeout(id);
+  }, [focusPool]);
 
   return (
     <NavigationContext.Provider
@@ -254,6 +263,11 @@ export function AppShell(): React.JSX.Element {
         activeOverlay,
         navigate: (link) => setActiveOverlay(link.overlay),
         close: () => setActiveOverlay(null),
+        focusPool,
+        focus: (poolId) => {
+          setActiveOverlay(null);
+          setFocusPool(poolId);
+        },
       }}
     >
       <div
@@ -288,8 +302,13 @@ export function AppShell(): React.JSX.Element {
             <p style={{ color: ocean.foam, padding: 24 }}>Loading…</p>
           ) : (
             <>
-              <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
-                <PixiReadout session={session} />
+              {/* Canvas region: a non-scrolling relative frame so the harbormaster's log
+                  floats over the canvas, with the temp readout scrolling inside it. */}
+              <div style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
+                <div style={{ position: "absolute", inset: 0, overflow: "auto", padding: 24 }}>
+                  <PixiReadout session={session} />
+                </div>
+                <HarbormasterLog />
               </div>
               {selectedIsland !== undefined && (
                 <IslandDock session={session} island={selectedIsland} />

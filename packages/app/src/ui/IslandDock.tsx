@@ -1,4 +1,5 @@
 import type { IslandId } from "@fathomrest/core";
+import { useEffect, useRef } from "react";
 
 import {
   buildCardViews,
@@ -12,12 +13,14 @@ import {
 import { displayCeil, displayFloor } from "../sim/display.ts";
 import type { SimSession } from "../sim/session.ts";
 import { islandXpView } from "../sim/world.ts";
+import { useNavigation } from "./navigation.ts";
 import { useSimTick } from "./SimSessionProvider.tsx";
 import {
   amber,
   barHeights,
   bodyFont,
   brass,
+  current,
   headingFont,
   moss,
   parchment,
@@ -130,11 +133,29 @@ function formatRate(rate: number): string {
   return `${rateSign(rounded)}${Math.abs(rounded).toFixed(1)}/s`;
 }
 
-function PoolRow({ row }: { row: PoolRowView }): React.JSX.Element {
+function PoolRow({ row, focused }: { row: PoolRowView; focused: boolean }): React.JSX.Element {
   const chip = resourceChip(row.resource);
   const frac = row.capacity > 0 ? Math.max(0, Math.min(1, row.amount / row.capacity)) : 0;
+  const ref = useRef<HTMLLIElement>(null);
+  // Deep-link landing: a log "Fix"/"View" focuses this pool — scroll it into view. The
+  // highlight ring is driven by `focused`, which the shell clears after a beat.
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [focused]);
   return (
-    <li style={{ listStyle: "none", marginBottom: 14 }}>
+    <li
+      ref={ref}
+      style={{
+        listStyle: "none",
+        marginBottom: 14,
+        padding: focused ? "6px 8px" : undefined,
+        margin: focused ? "-6px -8px 8px" : undefined,
+        borderRadius: radii.card,
+        outline: focused ? `2px solid ${current.base}` : undefined,
+        background: focused ? "rgba(61,122,140,0.12)" : undefined,
+        transition: "background 150ms ease-out, outline-color 150ms ease-out",
+      }}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span
           style={{
@@ -435,6 +456,7 @@ export function IslandDock({
   island: IslandId;
 }): React.JSX.Element {
   useSimTick();
+  const { focusPool } = useNavigation();
   const t = session.now();
   const rows = poolRowViews(session.world, island, t);
   const deposits = depositCardViews(session.world, island, t);
@@ -446,7 +468,7 @@ export function IslandDock({
         <h3 style={sectionLabelStyle}>Warehouse pools</h3>
         <ul style={{ margin: 0, padding: 0 }}>
           {rows.map((row) => (
-            <PoolRow key={row.id} row={row} />
+            <PoolRow key={row.id} row={row} focused={row.id === focusPool} />
           ))}
         </ul>
       </section>

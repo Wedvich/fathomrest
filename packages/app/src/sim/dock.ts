@@ -12,6 +12,7 @@ import {
   getDeposit,
   getWarehouse,
   isWarehouseJammed,
+  listJams,
   warehouseAmountAt,
   warehouseJamChain,
   type Id,
@@ -333,4 +334,35 @@ export function buildCardViews(world: DemoWorld, island: IslandId, t: number): B
   }
 
   return cards;
+}
+
+// Harbormaster's-log row (design handoff §1a). One per jammed/starved pool, roots first
+// (listJams already orders them). A root IS the bottleneck (rust severity); a symptom
+// points at its root by name (amber). `focusPoolId` is always the root — the fix target
+// the action deep-links to, even from a downstream symptom row.
+export interface JamLogEntry {
+  readonly poolId: Id; // the jammed/starved pool this row is about (row key)
+  readonly isRoot: boolean;
+  readonly full: boolean; // true = pool-full (jam), false = pool-empty (starved)
+  readonly subject: string; // pool label
+  readonly detail: string; // root reason, or "caused by <root>"
+  readonly focusPoolId: Id; // deep-link target (the root pool)
+}
+
+export function jamLogEntries(world: DemoWorld): JamLogEntry[] {
+  const state = world.state;
+  const labelById = new Map(world.warehouses.map((w) => [w.id, w.label] as const));
+  return listJams(state).map((entry) => {
+    const root = entry.chain.root;
+    return {
+      poolId: entry.warehouseId,
+      isRoot: entry.isRoot,
+      full: entry.kind === "pool-full",
+      subject: labelById.get(entry.warehouseId) ?? "A pool",
+      detail: entry.isRoot
+        ? jamRootReason(root.kind)
+        : `caused by ${labelById.get(root.warehouseId) ?? "another pool"}`,
+      focusPoolId: root.warehouseId,
+    };
+  });
 }
