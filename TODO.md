@@ -16,13 +16,13 @@ Phases, in order — sim-side prerequisites interleaved where noted:
   faces are wired everywhere — woff2/latin subsetting is still a follow-up, no conversion
   tooling installed); app shell (HUD bar, canvas region, overlay routing, Esc); sim-view
   layer (event-driven + ≥250 ms coarse-timer React subscription, `ui/SimSessionProvider.tsx`
-  + `sim/session.ts`); deep-link primitive (`ui/navigation.ts`: `NavigationContext` +
-  `useNavigation()`, HUD buttons route through it — extend `DeepLink` with a focus target
-  when phase 1's log rows / phase 2's fix buttons need one); `PixiReadout` split into sim
-  session (above) + island scene (`scene/IslandScene.ts`'s `useIslandScene` hook — generic
-  Pixi Application create/mount/destroy lifecycle, StrictMode-safe; `PixiReadout` keeps the
-  temp bar/button content as that hook's `build` callback, ready to be swapped for the real
-  island scene in phase 1).
+  - `sim/session.ts`); deep-link primitive (`ui/navigation.ts`: `NavigationContext` +
+    `useNavigation()`, HUD buttons route through it — extend `DeepLink` with a focus target
+    when phase 1's log rows / phase 2's fix buttons need one); `PixiReadout` split into sim
+    session (above) + island scene (`scene/IslandScene.ts`'s `useIslandScene` hook — generic
+    Pixi Application create/mount/destroy lifecycle, StrictMode-safe; `PixiReadout` keeps the
+    temp bar/button content as that hook's `build` callback, ready to be swapped for the real
+    island scene in phase 1).
 - **Phase 1 — island view (`1a`).** Top HUD, right dock (pool rows w/ jam states +
   outflow lines, deposit cards, build cards w/ cost chips), Pixi island scene (slot
   markers, JAM/deposit badges), slot tooltip, harbormaster's log. New selectors: jam
@@ -60,15 +60,36 @@ with this track). Non-committed alternates (`1b`,`1c`,`3b`,`4b`) stay design-onl
 
 ## Next session
 
-Phase 0 is done (see above). Start island view (`1a`):
+Phase 1 island view (`1a`) in progress. Landed this session:
 
-1. Right dock pool rows first (real data exists — jam flag/block reason come from
-   `isWarehouseJammed` + `warehouseJamChain`, landed on the
-   `worktree-rippling-dancing-honey` branch), then build cards + selectors (affordability
-   ETA, outflow attribution).
-2. When the dock needs to fill the canvas region properly (design handoff §1: canvas
-   left of a 352 px dock, not the current fixed-width temp readout), that's when
-   `PixiReadout`'s content moves into the real island scene built on `useIslandScene`.
+- **Right dock + WAREHOUSE POOLS** (`ui/IslandDock.tsx`): parchment 352 px `<aside>`,
+  pinned right in a flex-row `<main>` (canvas region left, temp `PixiReadout` still fills
+  it). Island header (name · `LV n` · XP, `XP paused ⏸` when any pool jammed) + one pool
+  row per island warehouse (chip, `cur/cap`, net rate, resource-color bar). Jam state
+  (JAM tag + rust cap-stripe + ROOT/`caused by …` sub-line) and converter outflow
+  sub-lines render from the core solver, no UI inference.
+- **Dock selectors** (`sim/dock.ts`): `poolRowViews` (island-filtered, so the global
+  knowledge pool is excluded — hard rule 1); outflow attribution via `forEachConverter` /
+  `converterDraw` matched to `converterSites` labels; `jamRootReason` (exhaustive over
+  `JamRootKind`). `resourceChip()` lookup helper added to `ui/tokens.ts`.
+- Verified live (fresh world screenshot, no console errors); typecheck/lint/166 tests green.
+
+Next, in order:
+
+1. **DEPOSITS + BUILD sections** in the dock (stubbed with a comment in `IslandDock.tsx`).
+   Deposit cards (reserve bar, richness ×, pause state, **next-step ETA + floor**) and
+   build cards (icon, cost chips w/ ✓/`need n` shortfall, **affordability ETA**, `→ GLOBAL K`
+   suffix). Migrate the temp readout's build/upgrade/skill/research `<button>`s here.
+   New selectors still to add: affordability ETA, deposit next-step ETA. (Jam/outflow done.)
+2. **Starved pools:** `poolRowViews` currently surfaces `isWarehouseJammed` (full) only —
+   add the `isWarehouseStarved` (empty, amber symptom) treatment when a starve case exists
+   to show it (single-island slice rarely starves yet).
+3. **Harbormaster's log** (React overlay, bottom-left of canvas) rendering `listJams`
+   (roots first) with deep-link action rows — needs `DeepLink` to grow a focus target
+   (`navigation.ts` note).
+4. When the dock needs the canvas to fill its region properly, `PixiReadout`'s content
+   moves into the real island scene on `useIslandScene` (slot markers, JAM/deposit badges,
+   slot tooltip). That retires the temp readout bars (now duplicated by the dock pool rows).
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools, and what lets multiple islands' observatories

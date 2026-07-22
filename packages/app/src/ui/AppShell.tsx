@@ -6,6 +6,7 @@ import { PixiReadout } from "../PixiReadout.tsx";
 import { displayFloor } from "../sim/display.ts";
 import { worldIslands } from "../sim/world.ts";
 import { UpdatePrompt } from "../UpdatePrompt.tsx";
+import { IslandDock } from "./IslandDock.tsx";
 import { NavigationContext, useNavigation, type OverlayKind } from "./navigation.ts";
 import { useSimSession, useSimTick } from "./SimSessionProvider.tsx";
 import { bodyFont, brass, headingFont, ocean, parchment, violet } from "./tokens.ts";
@@ -278,13 +279,22 @@ export function AppShell(): React.JSX.Element {
           </button>
         </header>
         {/* The page never scrolls (it's a game, not a document): the shell is a fixed 100dvh
-            column and overflow stays inside <main>. The temp Pixi readout is taller than the
-            viewport, so <main> scrolls internally until the real canvas region replaces it. */}
-        <main style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
+            column and overflow stays inside <main>. <main> is a row — the canvas region on the
+            left (the temp Pixi readout, still taller than the viewport so it scrolls internally)
+            and the parchment island dock pinned right (design handoff §1a). The readout swaps
+            for the real island scene once it needs to fill the region. */}
+        <main style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
           {session === null ? (
-            <p style={{ color: ocean.foam }}>Loading…</p>
+            <p style={{ color: ocean.foam, padding: 24 }}>Loading…</p>
           ) : (
-            <PixiReadout session={session} />
+            <>
+              <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 24 }}>
+                <PixiReadout session={session} />
+              </div>
+              {selectedIsland !== undefined && (
+                <IslandDock session={session} island={selectedIsland} />
+              )}
+            </>
           )}
         </main>
         <OverlayHost />

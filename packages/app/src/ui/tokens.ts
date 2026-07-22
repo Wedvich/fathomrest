@@ -96,6 +96,20 @@ export const resourceChips = {
   knowledge: { color: violet.core, monogram: "K" },
 } as const;
 
+export interface ResourceChip {
+  readonly color: string;
+  readonly monogram: string;
+}
+
+const RESOURCE_CHIP_FALLBACK: ResourceChip = { color: parchment.driftwood, monogram: "?" };
+
+/** Chip for a resourceType id, with a neutral fallback for ids without an authored chip. */
+export function resourceChip(resource: string): ResourceChip {
+  return Object.hasOwn(resourceChips, resource)
+    ? resourceChips[resource as keyof typeof resourceChips]
+    : RESOURCE_CHIP_FALLBACK;
+}
+
 export const radii = {
   bar: 3,
   chip: 4,
