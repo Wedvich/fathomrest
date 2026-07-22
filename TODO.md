@@ -80,6 +80,14 @@ Phase 1 island view (`1a`) in progress — the React right dock is complete. Lan
   button via `session.command`). Selectors added: `depositCardViews`, `buildCardViews`,
   `affordabilityEta`. Verified live (fresh → affordable; post-spend → shortfall/ETA/disabled).
 
+- **Harbormaster's log** (`ui/HarbormasterLog.tsx`): dark translucent panel floating
+  bottom-left of the canvas, rendering `listJams` roots-first (rust dot + ROOT reason for a
+  bottleneck, amber dot + "caused by <root>" for a symptom); hidden when clean. Fix/View
+  rows deep-link: `navigation.ts` grew `focusPool` + `focus(poolId)`; `AppShell` owns the
+  transient focus (auto-clears after 2.5 s) and hosts the log in a relative canvas frame;
+  the dock scrolls the target pool row into view and pulses a teal ring. `jamLogEntries`
+  added to `sim/dock.ts`. Verified live (two closed-sink jams; Fix scrolls + highlights).
+
 Next, in order:
 
 1. **Retire the temp readout / build the real Pixi island scene.** The dock now duplicates
@@ -89,15 +97,14 @@ Next, in order:
    then fills the space left of the dock. Skill-node + research buttons currently only live
    in the temp readout — they need homes (island-plan / research overlays, phases 4/3)
    BEFORE the readout is deleted, or they vanish. Sequence that: overlays first, or keep a
-   minimal temp control strip until they land.
-2. **Harbormaster's log** (React overlay, bottom-left of canvas) rendering `listJams`
-   (roots first) with deep-link action rows — needs `DeepLink` to grow a focus target
-   (`navigation.ts` note).
-3. **Starved pools:** `poolRowViews` surfaces `isWarehouseJammed` (full) only — add the
+   minimal temp control strip until they land. Slot tooltip + JAM/deposit badges can reuse
+   the same focus/`nav.focus` plumbing the log now exercises.
+2. **Starved pools:** `poolRowViews` surfaces `isWarehouseJammed` (full) only — add the
    `isWarehouseStarved` (empty, amber symptom) treatment when a starve case exists to show
-   it (single-island slice rarely starves yet).
-4. **Dock polish deferred:** slot tooltip adjacency copy; deposit-card richness-tier colors;
-   build-card icon art (striped placeholder for now).
+   it (single-island slice rarely starves yet). The log already handles `pool-empty` rows.
+3. **Dock polish deferred:** slot tooltip adjacency copy; deposit-card richness-tier colors;
+   build-card icon art (striped placeholder for now); log-row jam duration (needs a core
+   jam-onset timestamp — not tracked yet, so the row shows the cause, not "for 4m").
 
 Deferred (inter-island): **buildable/costed routes** (`buildRoute` fronting `addRoute`) —
 the mechanism for networking island pools, and what lets multiple islands' observatories
