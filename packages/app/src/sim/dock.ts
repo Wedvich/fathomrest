@@ -4,19 +4,34 @@
 // (the sim core is the source of truth for jam causality — handoff constraint).
 
 import {
+  canAffordBuild,
   converterDraw,
+  depositMultiplier,
+  depositRemainingAt,
   forEachConverter,
+  getDeposit,
   getWarehouse,
   isWarehouseJammed,
+  warehouseAmountAt,
   warehouseJamChain,
   type Id,
   type IslandId,
   type JamRootKind,
   type ResourceType,
-  warehouseAmountAt,
 } from "@fathomrest/core";
 
-import type { DemoWorld } from "./world.ts";
+import {
+  buildConverter,
+  buildExtractor,
+  isConverterBuilt,
+  isExtractorBuilt,
+  isGlobalScope,
+  nextStorageTier,
+  upgradeStorage,
+  type DemoWorld,
+} from "./world.ts";
+
+type CostEntries = readonly (readonly [ResourceType, number])[];
 
 // Outflow leg from a pool into a converter — the driftwood sub-line `−0.2/s → Refinery
 // (iron ingot)`. Routes are excluded until inter-island transport lands (buildRoute).
@@ -118,4 +133,204 @@ export function poolRowViews(world: DemoWorld, island: IslandId, t: number): Poo
     });
   }
   return rows;
+}
+
+// The (island, resource) pool id — one warehouse per pair (world.ts invariant), so the
+// first match is the pool. Build costs are charged against these.
+function islandPoolId(world: DemoWorld, island: IslandId, resource: ResourceType): Id | undefined {
+  for (const wh of world.warehouses) {
+    const core = getWarehouse(world.state, wh.id);
+    if (core.islandId === island && core.resource === resource) return wh.id;
+  }
+  return undefined;
+}
+
+// The next (lower) richness step a decaying deposit will fall to, and when.
+export interface DepositNextStep {
+  readonly multiplier: number;
+  readonly after: number; // units still extractable in the current tier before the step
+  readonly etaSeconds: number | null; // null when nothing is depleting the deposit
+}
+
+export interface DepositCardView {
+  readonly id: Id;
+  readonly label: string;
+  readonly resource: ResourceType;
+  readonly multiplier: number; // current richness ×
+  readonly remaining: number; // raw; caller ceils (sim/display.ts)
+  readonly total: number; // full rich reserve (sum of tiers; excludes the infinite floor)
+  readonly floorMultiplier: number;
+  readonly paused: boolean; // target pool jammed, so extraction is throttled off
+  readonly nextStep: DepositNextStep | null; // null once in the floor regime
+}
+
+// One card per deposit whose pool is on the island (an off-island pool means a global
+// observatory — surfaced in BUILD instead, not here).
+export function depositCardViews(world: DemoWorld, island: IslandId, t: number): DepositCardView[] {
+  const state = world.state;
+  const cards: DepositCardView[] = [];
+  for (const dep of world.deposits) {
+    const pool = getWarehouse(state, dep.warehouseId);
+    if (pool.islandId !== island) continue;
+    const core = getDeposit(state, dep.id);
+    const total = core.tiers.reduce((sum, tier) => sum + tier.amount, 0);
+    const laterTiers = core.tiers
+      .slice(core.tierIndex + 1)
+      .reduce((sum, tier) => sum + tier.amount, 0);
+    const remaining = depositRemainingAt(state, dep.id, t);
+    const inTier = Math.max(0, remaining - laterTiers);
+
+    let nextStep: DepositNextStep | null = null;
+    if (core.tierIndex < core.tiers.length) {
+      const next = core.tiers[core.tierIndex + 1];
+      nextStep = {
+        multiplier: next?.multiplier ?? core.floorMultiplier,
+        after: inTier,
+        etaSeconds: core.depletionRate > 0 ? inTier / core.depletionRate : null,
+      };
+    }
+
+    cards.push({
+      id: dep.id,
+      label: dep.label,
+      resource: dep.resource,
+      multiplier: depositMultiplier(state, dep.id),
+      remaining,
+      total,
+      floorMultiplier: core.floorMultiplier,
+      paused: isWarehouseJammed(state, dep.warehouseId),
+      nextStep,
+    });
+  }
+  return cards;
+}
+
+export interface CostChip {
+  readonly resource: ResourceType;
+  readonly amount: number;
+  readonly have: number; // raw current stock on the pay island; caller floors
+  readonly affordable: boolean;
+  readonly shortfall: number; // amount − have, 0 when affordable
+}
+
+export interface BuildCardView {
+  readonly key: string;
+  readonly name: string;
+  readonly costs: readonly CostChip[];
+  readonly affordable: boolean;
+  readonly etaSeconds: number | null; // time to afford at current rates; null if unattainable
+  readonly feedsGlobal: boolean; // → GLOBAL K suffix (a knowledge-pool build site)
+  readonly run: (t: number) => boolean; // the core command; drive via session.command
+}
+
+// Seconds until every cost resource is affordable at its pool's current net rate. null
+// when any shortfall sits on a pool that isn't filling (rate ≤ 0) — the ETA line is then
+// suppressed rather than shown as "never".
+function affordabilityEta(
+  world: DemoWorld,
+  island: IslandId,
+  cost: CostEntries,
+  t: number,
+): number | null {
+  const state = world.state;
+  let maxEta = 0;
+  for (const [resource, amount] of cost) {
+    if (amount <= 0) continue;
+    const poolId = islandPoolId(world, island, resource);
+    if (poolId === undefined) return null;
+    const have = warehouseAmountAt(state, poolId, t);
+    if (have >= amount) continue;
+    const netRate = getWarehouse(state, poolId).netRate;
+    if (netRate <= 0) return null;
+    maxEta = Math.max(maxEta, (amount - have) / netRate);
+  }
+  return maxEta;
+}
+
+function buildCard(
+  world: DemoWorld,
+  island: IslandId,
+  t: number,
+  spec: {
+    key: string;
+    name: string;
+    cost: CostEntries;
+    feedsGlobal: boolean;
+    run: (t: number) => boolean;
+  },
+): BuildCardView {
+  const state = world.state;
+  const costs: CostChip[] = spec.cost.map(([resource, amount]) => {
+    const poolId = islandPoolId(world, island, resource);
+    const have = poolId === undefined ? 0 : warehouseAmountAt(state, poolId, t);
+    return {
+      resource,
+      amount,
+      have,
+      affordable: have >= amount,
+      shortfall: Math.max(0, amount - have),
+    };
+  });
+  const affordable = canAffordBuild(state, t, island, new Map(spec.cost));
+  return {
+    key: spec.key,
+    name: spec.name,
+    costs,
+    affordable,
+    etaSeconds: affordable ? null : affordabilityEta(world, island, spec.cost, t),
+    feedsGlobal: spec.feedsGlobal,
+    run: spec.run,
+  };
+}
+
+// Buildable structures on the island: unbuilt extractors (incl. the global observatory,
+// which is paid from here), unbuilt converters sited here, and the next storage rung.
+// Skill nodes and research are their own overlays (parchment plan / violet star chart),
+// never the dock — hard rule 5.
+export function buildCardViews(world: DemoWorld, island: IslandId, t: number): BuildCardView[] {
+  const state = world.state;
+  const cards: BuildCardView[] = [];
+
+  for (const dep of world.deposits) {
+    if (dep.payIslandId !== island) continue;
+    if (isExtractorBuilt(world, dep.id)) continue;
+    cards.push(
+      buildCard(world, island, t, {
+        key: `extractor:${dep.id}`,
+        name: dep.label,
+        cost: dep.cost,
+        feedsGlobal: isGlobalScope(getWarehouse(state, dep.warehouseId).islandId),
+        run: (tt) => buildExtractor(world, dep.id, tt),
+      }),
+    );
+  }
+
+  for (const site of world.converterSites) {
+    if (getWarehouse(state, site.srcWarehouseId).islandId !== island) continue;
+    if (isConverterBuilt(world, site.srcWarehouseId, site.dstWarehouseId)) continue;
+    cards.push(
+      buildCard(world, island, t, {
+        key: `converter:${site.srcWarehouseId}:${site.dstWarehouseId}`,
+        name: site.label,
+        cost: site.cost,
+        feedsGlobal: isGlobalScope(getWarehouse(state, site.dstWarehouseId).islandId),
+        run: (tt) => buildConverter(world, site, tt),
+      }),
+    );
+  }
+
+  const tier = nextStorageTier(world, island);
+  if (tier !== undefined) {
+    cards.push(
+      buildCard(world, island, t, {
+        key: "storage",
+        name: `Storage → ${tier.capacity}`,
+        cost: tier.cost,
+        feedsGlobal: false,
+        run: (tt) => upgradeStorage(world, island, tt),
+      }),
+    );
+  }
+
+  return cards;
 }

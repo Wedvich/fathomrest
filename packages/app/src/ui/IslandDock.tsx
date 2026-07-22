@@ -1,9 +1,17 @@
 import type { IslandId } from "@fathomrest/core";
 
-import { poolRowViews, type PoolRowView } from "../sim/dock.ts";
-import { displayFloor } from "../sim/display.ts";
-import { islandXpView } from "../sim/world.ts";
+import {
+  buildCardViews,
+  depositCardViews,
+  poolRowViews,
+  type BuildCardView,
+  type CostChip,
+  type DepositCardView,
+  type PoolRowView,
+} from "../sim/dock.ts";
+import { displayCeil, displayFloor } from "../sim/display.ts";
 import type { SimSession } from "../sim/session.ts";
+import { islandXpView } from "../sim/world.ts";
 import { useSimTick } from "./SimSessionProvider.tsx";
 import {
   amber,
@@ -16,6 +24,7 @@ import {
   radii,
   resourceChip,
   rust,
+  violet,
 } from "./tokens.ts";
 
 // Right dock (design handoff §1a): the island's economy as React panels — parchment
@@ -23,8 +32,9 @@ import {
 // tick (≥250 ms); the Pixi ticker keeps the sim advanced, so a plain read at now() is
 // exact (closed-form, clamped) — this panel never advances the sim itself.
 //
-// This pass ships the island header + WAREHOUSE POOLS. DEPOSITS and BUILD land next
-// (see the section stubs below) as the temp Pixi readout's cards migrate here.
+// Sections: island header, WAREHOUSE POOLS, DEPOSITS, BUILD. Build actions go through
+// session.command (persists + notifies only when the command acted). Skill nodes and
+// research stay out of the dock — they belong to their own overlays (hard rule 5).
 
 const DOCK_WIDTH = 352;
 
@@ -254,6 +264,169 @@ function shade(hex: string): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 }
 
+function formatDuration(seconds: number): string {
+  const s = Math.max(1, Math.ceil(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+const cardStyle: React.CSSProperties = {
+  padding: 10,
+  marginBottom: 10,
+  borderRadius: radii.card,
+  background: parchment.card,
+  border: `1px solid ${parchment.deckShadow}`,
+};
+
+function DepositCard({ card }: { card: DepositCardView }): React.JSX.Element {
+  const frac = card.total > 0 ? Math.max(0, Math.min(1, card.remaining / card.total)) : 0;
+  const chip = resourceChip(card.resource);
+  return (
+    <li style={{ ...cardStyle, listStyle: "none" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>{card.label}</span>
+        <span
+          style={{
+            padding: "0 5px",
+            borderRadius: radii.chip,
+            background: parchment.heartwood,
+            color: parchment.sailcloth,
+            fontSize: 10,
+            fontWeight: 700,
+          }}
+        >
+          ×{card.multiplier}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{ ...tabular, fontSize: 12, color: parchment.heartwood }}>
+          {displayCeil(card.remaining)} / {card.total}
+        </span>
+      </div>
+      <div
+        style={{
+          height: barHeights.deposit,
+          marginTop: 5,
+          borderRadius: radii.bar,
+          border: `1px solid ${parchment.deckShadow}`,
+          background: parchment.agedFold,
+          overflow: "hidden",
+        }}
+      >
+        <div style={{ width: `${frac * 100}%`, height: "100%", background: chip.color }} />
+      </div>
+      <div style={{ marginTop: 4, fontSize: 11, color: parchment.driftwood }}>
+        {card.paused && <span style={{ color: rust.onParchment }}>⏸ paused by jam · </span>}
+        {card.nextStep === null
+          ? `at floor ×${card.floorMultiplier}`
+          : `→ ×${card.nextStep.multiplier} after ${displayCeil(card.nextStep.after)} more · floor ×${card.floorMultiplier}`}
+      </div>
+    </li>
+  );
+}
+
+function CostChipView({ chip }: { chip: CostChip }): React.JSX.Element {
+  const affordable = chip.affordable;
+  return (
+    <span
+      style={{
+        ...tabular,
+        padding: "1px 6px",
+        borderRadius: radii.chip,
+        fontSize: 11,
+        whiteSpace: "nowrap",
+        fontWeight: affordable ? 400 : 700,
+        background: affordable ? parchment.agedFold : rust.tintBg,
+        border: `1px solid ${affordable ? parchment.deckShadow : rust.tintBorder}`,
+        color: affordable ? parchment.ink : rust.onParchment,
+      }}
+    >
+      {affordable
+        ? `${chip.amount} ${chip.resource.replace("-", " ")} ✓`
+        : `${chip.amount} — need ${displayCeil(chip.shortfall)}`}
+    </span>
+  );
+}
+
+function BuildCard({
+  card,
+  onBuild,
+}: {
+  card: BuildCardView;
+  onBuild: () => void;
+}): React.JSX.Element {
+  const { affordable } = card;
+  return (
+    <li
+      style={{
+        ...cardStyle,
+        listStyle: "none",
+        background: affordable ? parchment.card : parchment.cardMuted,
+        border: `1px solid ${affordable ? parchment.brassEdge : parchment.deckShadow}`,
+        borderStyle: affordable ? "solid" : "dashed",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <span
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: radii.chip,
+            background: `repeating-linear-gradient(45deg, ${parchment.deckShadow}, ${parchment.deckShadow} 3px, ${parchment.agedFold} 3px, ${parchment.agedFold} 6px)`,
+            flex: "none",
+          }}
+          aria-hidden="true"
+        />
+        <span style={{ fontWeight: 700, fontSize: 13 }}>{card.name}</span>
+        {card.feedsGlobal && (
+          <span
+            style={{
+              padding: "0 5px",
+              borderRadius: radii.chip,
+              background: violet.bg,
+              color: violet.pale,
+              fontSize: 9,
+              fontWeight: 800,
+              letterSpacing: 0.4,
+            }}
+          >
+            → GLOBAL K
+          </span>
+        )}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+        {card.costs.map((chip) => (
+          <CostChipView key={chip.resource} chip={chip} />
+        ))}
+      </div>
+      {!affordable && card.etaSeconds !== null && (
+        <div style={{ fontSize: 11, color: moss.base, marginBottom: 6 }}>
+          affordable in ~{formatDuration(card.etaSeconds)} at current rate
+        </div>
+      )}
+      <button
+        type="button"
+        disabled={!affordable}
+        onClick={onBuild}
+        style={{
+          width: "100%",
+          padding: "5px 0",
+          borderRadius: radii.button,
+          fontFamily: bodyFont,
+          fontWeight: 700,
+          fontSize: 12.5,
+          cursor: affordable ? "pointer" : "default",
+          border: "none",
+          background: affordable ? brass.base : parchment.deckShadow,
+          color: affordable ? parchment.ink : parchment.driftwood,
+        }}
+      >
+        Build
+      </button>
+    </li>
+  );
+}
+
 export function IslandDock({
   session,
   island,
@@ -262,7 +435,10 @@ export function IslandDock({
   island: IslandId;
 }): React.JSX.Element {
   useSimTick();
-  const rows = poolRowViews(session.world, island, session.now());
+  const t = session.now();
+  const rows = poolRowViews(session.world, island, t);
+  const deposits = depositCardViews(session.world, island, t);
+  const builds = buildCardViews(session.world, island, t);
   return (
     <aside style={dockStyle} aria-label="Island economy">
       <IslandHeader session={session} island={island} />
@@ -274,8 +450,26 @@ export function IslandDock({
           ))}
         </ul>
       </section>
-      {/* DEPOSITS and BUILD sections land next — deposit cards + build cards with cost
-          chips migrate here from the temp Pixi readout's controls. */}
+      {deposits.length > 0 && (
+        <section style={{ padding: "0 16px 14px" }}>
+          <h3 style={sectionLabelStyle}>Deposits</h3>
+          <ul style={{ margin: 0, padding: 0 }}>
+            {deposits.map((card) => (
+              <DepositCard key={card.id} card={card} />
+            ))}
+          </ul>
+        </section>
+      )}
+      {builds.length > 0 && (
+        <section style={{ padding: "0 16px 16px" }}>
+          <h3 style={sectionLabelStyle}>Build</h3>
+          <ul style={{ margin: 0, padding: 0 }}>
+            {builds.map((card) => (
+              <BuildCard key={card.key} card={card} onBuild={() => session.command(card.run)} />
+            ))}
+          </ul>
+        </section>
+      )}
     </aside>
   );
 }
